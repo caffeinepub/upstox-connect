@@ -1,0 +1,199 @@
+@font-face {
+  font-family: "Bricolage Grotesque";
+  src: url("/assets/fonts/BricolageGrotesque.woff2") format("woff2");
+  font-weight: 200 800;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/assets/fonts/JetBrainsMono.woff2") format("woff2");
+  font-weight: 300 700;
+  font-display: swap;
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* ── Dark mode (default) ─────────────────────────────────── */
+  :root {
+    color-scheme: dark;
+    /* Dark trading terminal palette */
+    --background: 0.08 0.003 240;
+    --foreground: 0.93 0.008 220;
+
+    --card: 0.11 0.005 240;
+    --card-foreground: 0.9 0.008 220;
+
+    --popover: 0.11 0.005 240;
+    --popover-foreground: 0.9 0.008 220;
+
+    --primary: 0.62 0.2 250;
+    --primary-foreground: 0.98 0.005 240;
+
+    --secondary: 0.14 0.006 240;
+    --secondary-foreground: 0.7 0.008 220;
+
+    --muted: 0.14 0.006 240;
+    --muted-foreground: 0.48 0.008 240;
+
+    --accent: 0.62 0.2 250;
+    --accent-foreground: 0.98 0.005 240;
+
+    --destructive: 0.62 0.22 22;
+    --destructive-foreground: 0.98 0.01 0;
+
+    --gain: 0.64 0.2 145;
+    --gain-foreground: 0.98 0.01 145;
+
+    --atm: 0.72 0.18 75;
+
+    --border: 0.18 0.006 240;
+    --input: 0.18 0.006 240;
+    --ring: 0.62 0.2 250;
+
+    --radius: 0.375rem;
+
+    --chart-1: 0.62 0.2 250;
+    --chart-2: 0.64 0.2 145;
+    --chart-3: 0.62 0.22 22;
+    --chart-4: 0.72 0.18 75;
+    --chart-5: 0.68 0.15 300;
+
+    --sidebar: 0.09 0.004 240;
+    --sidebar-foreground: 0.85 0.008 220;
+    --sidebar-primary: 0.62 0.2 250;
+    --sidebar-primary-foreground: 0.98 0.005 240;
+    --sidebar-accent: 0.14 0.006 240;
+    --sidebar-accent-foreground: 0.7 0.008 220;
+    --sidebar-border: 0.16 0.005 240;
+    --sidebar-ring: 0.62 0.2 250;
+  }
+
+  /* ── Light mode ──────────────────────────────────────────── */
+  .light {
+    color-scheme: light;
+
+    --background: 0.97 0.003 240;
+    --foreground: 0.1 0.008 240;
+
+    --card: 0.99 0.002 240;
+    --card-foreground: 0.1 0.008 240;
+
+    --popover: 0.99 0.002 240;
+    --popover-foreground: 0.1 0.008 240;
+
+    --primary: 0.52 0.2 250;
+    --primary-foreground: 0.99 0.005 240;
+
+    --secondary: 0.92 0.004 240;
+    --secondary-foreground: 0.2 0.008 240;
+
+    --muted: 0.92 0.004 240;
+    --muted-foreground: 0.45 0.008 240;
+
+    --accent: 0.52 0.2 250;
+    --accent-foreground: 0.99 0.005 240;
+
+    --destructive: 0.55 0.22 22;
+    --destructive-foreground: 0.99 0.01 0;
+
+    --gain: 0.5 0.18 145;
+    --gain-foreground: 0.99 0.01 145;
+
+    --atm: 0.6 0.18 75;
+
+    --border: 0.82 0.006 240;
+    --input: 0.82 0.006 240;
+    --ring: 0.52 0.2 250;
+
+    --chart-1: 0.52 0.2 250;
+    --chart-2: 0.5 0.18 145;
+    --chart-3: 0.55 0.22 22;
+    --chart-4: 0.6 0.18 75;
+    --chart-5: 0.58 0.15 300;
+
+    --sidebar: 0.94 0.004 240;
+    --sidebar-foreground: 0.15 0.008 240;
+    --sidebar-primary: 0.52 0.2 250;
+    --sidebar-primary-foreground: 0.99 0.005 240;
+    --sidebar-accent: 0.88 0.004 240;
+    --sidebar-accent-foreground: 0.2 0.008 240;
+    --sidebar-border: 0.8 0.005 240;
+    --sidebar-ring: 0.52 0.2 250;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-body;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overscroll-behavior-y: contain;
+  }
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+}
+
+@layer utilities {
+  .font-mono-data {
+    font-family: "JetBrains Mono", monospace;
+    font-feature-settings: "tnum" 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .text-gain {
+    color: oklch(var(--gain));
+  }
+  .text-loss {
+    color: oklch(var(--destructive));
+  }
+  .text-atm {
+    color: oklch(var(--atm));
+  }
+  .bg-gain\/10 {
+    background-color: oklch(var(--gain) / 0.1);
+  }
+  .bg-loss\/10 {
+    background-color: oklch(var(--destructive) / 0.1);
+  }
+  .border-gain\/30 {
+    border-color: oklch(var(--gain) / 0.3);
+  }
+  .border-loss\/30 {
+    border-color: oklch(var(--destructive) / 0.3);
+  }
+  .glow-blue {
+    box-shadow: 0 0 12px oklch(0.62 0.2 250 / 0.3);
+  }
+  .glow-blue-sm {
+    box-shadow: 0 0 6px oklch(0.62 0.2 250 / 0.2);
+  }
+  .scanline {
+    background: repeating-linear-gradient(
+      to bottom,
+      transparent 0px,
+      transparent 3px,
+      oklch(0 0 0 / 0.04) 3px,
+      oklch(0 0 0 / 0.04) 4px
+    );
+  }
+  .hide-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .hide-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .terminal-border {
+    border: 1px solid oklch(var(--border));
+  }
+}
