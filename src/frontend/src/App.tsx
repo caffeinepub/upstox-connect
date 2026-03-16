@@ -1,10 +1,22 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { Toaster } from "@/components/ui/sonner";
+import {
+  Tabs as SettingsTabs,
+  TabsContent as SettingsTabsContent,
+  TabsList as SettingsTabsList,
+  TabsTrigger as SettingsTabsTrigger,
+} from "@/components/ui/tabs";
 import {
   Activity,
   AlertTriangle,
@@ -24,6 +36,7 @@ import {
   Moon,
   Plus,
   RefreshCw,
+  Settings,
   Shield,
   Sun,
   TrendingDown,
@@ -33,7 +46,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
@@ -69,6 +82,26 @@ const KEYS = {
   redirectUri: "upstox_redirect_uri",
   token: "upstox_access_token",
 };
+
+// ─── Index Lot Sizes ─────────────────────────────────────────────────────────
+const INDEX_LOT_SIZES: Record<string, number> = {
+  "NSE_INDEX|Nifty 50": 75,
+  "NSE_INDEX|Nifty Bank": 30,
+  "NSE_INDEX|FINNIFTY": 65,
+  "NSE_INDEX|MIDCPNIFTY": 120,
+  "BSE_INDEX|SENSEX": 10,
+};
+
+function getLotSize(instrumentKey: string): number {
+  if (INDEX_LOT_SIZES[instrumentKey]) return INDEX_LOT_SIZES[instrumentKey];
+  const key = instrumentKey.toUpperCase();
+  if (key.includes("NIFTY BANK") || key.includes("BANKNIFTY")) return 30;
+  if (key.includes("FINNIFTY")) return 65;
+  if (key.includes("MIDCPNIFTY") || key.includes("MIDCAP")) return 120;
+  if (key.includes("SENSEX")) return 10;
+  if (key.includes("NIFTY")) return 75;
+  return 1;
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type WsStatus = "disconnected" | "connecting" | "connected" | "error";
@@ -151,9 +184,11 @@ interface Holding {
 interface OptionData {
   strike_price: number;
   call_options?: {
+    instrument_key?: string;
     market_data?: { ltp?: number; oi?: number; volume?: number; iv?: number };
   };
   put_options?: {
+    instrument_key?: string;
     market_data?: { ltp?: number; oi?: number; volume?: number; iv?: number };
   };
 }
@@ -325,6 +360,54 @@ function useIndexWebSocket(token: string) {
     };
   }, [token, connect]);
 
+  // REST polling fallback every 1s when WS is not connected
+  useEffect(() => {
+    if (!token) return;
+    const poll = async () => {
+      try {
+        const keys = INDEX_KEYS.join(",");
+        const res = await fetch(
+          `https://api.upstox.com/v2/market-quote/ltp?instrument_key=${encodeURIComponent(keys)}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: "application/json",
+            },
+          },
+        );
+        if (!res.ok) return;
+        const json = await res.json();
+        if (json?.data) {
+          setTicks((prev) => {
+            const next = { ...prev };
+            const now = Date.now();
+            for (const [rawKey, val] of Object.entries<any>(json.data)) {
+              const key = rawKey.replace(":", "|");
+              const ltp = val?.last_price ?? 0;
+              if (ltp > 0) {
+                const prevLtp = prev[key]?.ltp ?? 0;
+                next[key] = {
+                  key,
+                  ltp,
+                  change: ltp - prevLtp,
+                  bid: 0,
+                  ask: 0,
+                  volume: 0,
+                  ts: now,
+                };
+              }
+            }
+            return next;
+          });
+          setLastUpdated(new Date());
+        }
+      } catch {}
+    };
+    poll();
+    const id = setInterval(poll, 1000);
+    return () => clearInterval(id);
+  }, [token]);
+
   return { ticks, wsStatus, lastUpdated };
 }
 
@@ -420,7 +503,7 @@ function IndexChip({
               })}
             </span>
             <span
-              className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+              className={`text-xs font-bold px-2 py-0.5 rounded ${
                 pos
                   ? "bg-green-950 text-gain border border-green-800/40"
                   : "bg-red-950 text-loss border border-red-800/40"
@@ -446,6 +529,400 @@ function IndexChip({
   );
 }
 
+// ─── Trade Settings ───────────────────────────────────────────────────────────
+const TRADE_SETTINGS_KEY = "upstox_trade_settings";
+const ACCOUNTS_KEY = "upstox_accounts";
+
+interface TradeSettings {
+  slPct: number;
+  trailingGap: number;
+  tgt1RR: number;
+  tgt2RR: number;
+}
+
+interface AccountEntry {
+  id: string;
+  name: string;
+  apiKey: string;
+  apiSecret: string;
+  redirectUri: string;
+  token: string;
+}
+
+const DEFAULT_TRADE_SETTINGS: TradeSettings = {
+  slPct: 25,
+  trailingGap: 5,
+  tgt1RR: 2,
+  tgt2RR: 3,
+};
+
+function loadTradeSettings(): TradeSettings {
+  try {
+    const stored = JSON.parse(localStorage.getItem(TRADE_SETTINGS_KEY) ?? "{}");
+    return { ...DEFAULT_TRADE_SETTINGS, ...stored };
+  } catch {
+    return DEFAULT_TRADE_SETTINGS;
+  }
+}
+
+function loadAccounts(): AccountEntry[] {
+  try {
+    return JSON.parse(localStorage.getItem(ACCOUNTS_KEY) ?? "[]");
+  } catch {
+    return [];
+  }
+}
+
+// ─── Settings Modal ───────────────────────────────────────────────────────────
+
+function SettingsModal({
+  open,
+  onClose,
+  tradeSettings,
+  onTradeSettingsSave,
+}: {
+  open: boolean;
+  onClose: () => void;
+  tradeSettings: TradeSettings;
+  onTradeSettingsSave: (s: TradeSettings) => void;
+}) {
+  const [sl, setSl] = useState(String(tradeSettings.slPct));
+  const [tg, setTg] = useState(String(tradeSettings.trailingGap));
+  const [t1, setT1] = useState(String(tradeSettings.tgt1RR));
+  const [t2, setT2] = useState(String(tradeSettings.tgt2RR));
+  const [accounts, setAccounts] = useState<AccountEntry[]>(loadAccounts);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [newAcc, setNewAcc] = useState<Omit<AccountEntry, "id">>({
+    name: "",
+    apiKey: "",
+    apiSecret: "",
+    redirectUri: "",
+    token: "",
+  });
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+
+  const currentApiKey = localStorage.getItem("upstox_api_key") ?? "";
+
+  const saveTradeSettings = () => {
+    const s: TradeSettings = {
+      slPct: Math.min(99, Math.max(1, Number(sl) || 25)),
+      trailingGap: Math.min(50, Math.max(0.5, Number(tg) || 5)),
+      tgt1RR: Math.min(20, Math.max(1, Number(t1) || 2)),
+      tgt2RR: Math.min(20, Math.max(1, Number(t2) || 3)),
+    };
+    localStorage.setItem(TRADE_SETTINGS_KEY, JSON.stringify(s));
+    onTradeSettingsSave(s);
+    toast.success("Trade settings saved");
+  };
+
+  const saveAccounts = (list: AccountEntry[]) => {
+    setAccounts(list);
+    localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(list));
+  };
+
+  const addAccount = () => {
+    if (!newAcc.name || !newAcc.apiKey) {
+      toast.error("Name and API Key are required");
+      return;
+    }
+    const entry: AccountEntry = { ...newAcc, id: Date.now().toString() };
+    saveAccounts([...accounts, entry]);
+    setNewAcc({
+      name: "",
+      apiKey: "",
+      apiSecret: "",
+      redirectUri: "",
+      token: "",
+    });
+    setShowAddForm(false);
+    toast.success("Account added");
+  };
+
+  const switchAccount = (acc: AccountEntry) => {
+    localStorage.setItem("upstox_api_key", acc.apiKey);
+    localStorage.setItem("upstox_api_secret", acc.apiSecret);
+    localStorage.setItem("upstox_redirect_uri", acc.redirectUri);
+    localStorage.setItem("upstox_token", acc.token);
+    toast.success(`Switched to ${acc.name}`);
+    setTimeout(() => window.location.reload(), 600);
+  };
+
+  const deleteAccount = (id: string) => {
+    saveAccounts(accounts.filter((a) => a.id !== id));
+    setDeleteConfirm(null);
+    toast.success("Account removed");
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent
+        data-ocid="settings.dialog"
+        className="max-w-md w-full"
+        style={{
+          background: "oklch(var(--card))",
+          border: "1px solid oklch(var(--border))",
+        }}
+      >
+        <DialogHeader>
+          <DialogTitle className="text-sm font-bold text-foreground flex items-center gap-2">
+            <Settings className="w-4 h-4 text-primary" />
+            Settings
+          </DialogTitle>
+        </DialogHeader>
+        <SettingsTabs defaultValue="trade">
+          <SettingsTabsList className="w-full mb-3 bg-secondary">
+            <SettingsTabsTrigger
+              data-ocid="settings.trade_settings.tab"
+              value="trade"
+              className="flex-1 text-xs"
+            >
+              Trade Settings
+            </SettingsTabsTrigger>
+            <SettingsTabsTrigger
+              data-ocid="settings.accounts.tab"
+              value="accounts"
+              className="flex-1 text-xs"
+            >
+              Accounts
+            </SettingsTabsTrigger>
+          </SettingsTabsList>
+
+          <SettingsTabsContent value="trade" className="space-y-3 mt-0">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                  Stop Loss %
+                </Label>
+                <Input
+                  data-ocid="settings.sl_pct.input"
+                  type="number"
+                  min={1}
+                  max={99}
+                  step={0.5}
+                  value={sl}
+                  onChange={(e) => setSl(e.target.value)}
+                  className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs"
+                />
+              </div>
+              <div>
+                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                  Trailing SL Gap %
+                </Label>
+                <Input
+                  data-ocid="settings.trailing_gap.input"
+                  type="number"
+                  min={0.5}
+                  max={50}
+                  step={0.5}
+                  value={tg}
+                  onChange={(e) => setTg(e.target.value)}
+                  className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs"
+                />
+              </div>
+              <div>
+                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                  TGT1 R:R
+                </Label>
+                <Input
+                  data-ocid="settings.tgt1_rr.input"
+                  type="number"
+                  min={1}
+                  max={20}
+                  step={0.5}
+                  value={t1}
+                  onChange={(e) => setT1(e.target.value)}
+                  className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs"
+                />
+              </div>
+              <div>
+                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                  TGT2 R:R
+                </Label>
+                <Input
+                  data-ocid="settings.tgt2_rr.input"
+                  type="number"
+                  min={1}
+                  max={20}
+                  step={0.5}
+                  value={t2}
+                  onChange={(e) => setT2(e.target.value)}
+                  className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs"
+                />
+              </div>
+            </div>
+            <div className="pt-1 flex justify-between items-center">
+              <p className="text-[10px] text-muted-foreground">
+                SL: {sl}% · Trailing: {tg}% · TGT1: 1:{t1}R · TGT2: 1:{t2}R
+              </p>
+              <Button
+                data-ocid="settings.save.button"
+                size="sm"
+                onClick={saveTradeSettings}
+                className="h-7 text-xs"
+              >
+                Save
+              </Button>
+            </div>
+          </SettingsTabsContent>
+
+          <SettingsTabsContent value="accounts" className="mt-0">
+            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+              {accounts.length === 0 && (
+                <p className="text-xs text-muted-foreground text-center py-4">
+                  No saved accounts
+                </p>
+              )}
+              {accounts.map((acc, i) => (
+                <div
+                  key={acc.id}
+                  data-ocid={`settings.accounts.item.${i + 1}`}
+                  className="flex items-center gap-2 p-2 rounded border border-border"
+                  style={{ background: "oklch(var(--secondary))" }}
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-foreground truncate">
+                      {acc.name}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground font-mono truncate">
+                      {acc.apiKey.slice(0, 8)}••••
+                    </p>
+                  </div>
+                  {acc.apiKey === currentApiKey && (
+                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-primary/20 text-primary border border-primary/30">
+                      ACTIVE
+                    </span>
+                  )}
+                  {deleteConfirm === acc.id ? (
+                    <div className="flex gap-1">
+                      <button
+                        data-ocid={`settings.account.delete.button.${i + 1}`}
+                        type="button"
+                        onClick={() => deleteAccount(acc.id)}
+                        className="text-[10px] px-2 py-1 rounded bg-red-900/60 text-red-300 border border-red-700/40 hover:bg-red-900"
+                      >
+                        Confirm
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDeleteConfirm(null)}
+                        className="text-[10px] px-2 py-1 rounded bg-secondary text-muted-foreground border border-border"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex gap-1">
+                      <button
+                        data-ocid={`settings.account.switch.button.${i + 1}`}
+                        type="button"
+                        onClick={() => switchAccount(acc)}
+                        className="text-[10px] px-2 py-1 rounded bg-primary/20 text-primary border border-primary/30 hover:bg-primary/30"
+                      >
+                        Switch
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDeleteConfirm(acc.id)}
+                        className="text-[10px] px-2 py-1 rounded bg-secondary text-muted-foreground border border-border hover:text-destructive"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {showAddForm ? (
+              <div className="mt-3 space-y-2 border-t border-border pt-3">
+                <p className="text-xs font-semibold text-foreground">
+                  Add Account
+                </p>
+                {[
+                  {
+                    key: "name",
+                    label: "Account Name",
+                    placeholder: "Main Account",
+                  },
+                  {
+                    key: "apiKey",
+                    label: "API Key",
+                    placeholder: "your-api-key",
+                  },
+                  {
+                    key: "apiSecret",
+                    label: "API Secret",
+                    placeholder: "your-api-secret",
+                  },
+                  {
+                    key: "redirectUri",
+                    label: "Redirect URI",
+                    placeholder: "https://...",
+                  },
+                  {
+                    key: "token",
+                    label: "Access Token (optional)",
+                    placeholder: "",
+                  },
+                ].map(({ key, label, placeholder }) => (
+                  <div key={key}>
+                    <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                      {label}
+                    </Label>
+                    <Input
+                      type={
+                        key === "apiSecret" || key === "token"
+                          ? "password"
+                          : "text"
+                      }
+                      placeholder={placeholder}
+                      value={(newAcc as any)[key]}
+                      onChange={(e) =>
+                        setNewAcc((prev) => ({
+                          ...prev,
+                          [key]: e.target.value,
+                        }))
+                      }
+                      className="h-7 mt-0.5 bg-secondary border-border text-xs font-mono"
+                    />
+                  </div>
+                ))}
+                <div className="flex gap-2 pt-1">
+                  <Button
+                    size="sm"
+                    onClick={addAccount}
+                    className="h-7 text-xs flex-1"
+                  >
+                    Save Account
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setShowAddForm(false)}
+                    className="h-7 text-xs"
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <Button
+                data-ocid="settings.add_account.button"
+                size="sm"
+                variant="outline"
+                onClick={() => setShowAddForm(true)}
+                className="w-full mt-3 h-7 text-xs border-dashed"
+              >
+                <Plus className="w-3 h-3 mr-1" /> Add Account
+              </Button>
+            )}
+          </SettingsTabsContent>
+        </SettingsTabs>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ─── Header ───────────────────────────────────────────────────────────────────
 function AppHeader({
   onDisconnect,
@@ -456,6 +933,7 @@ function AppHeader({
   theme,
   onThemeToggle,
   lastUpdated,
+  onSettingsOpen,
 }: {
   token?: string;
   onDisconnect: () => void;
@@ -466,6 +944,7 @@ function AppHeader({
   theme?: "dark" | "light";
   onThemeToggle?: () => void;
   lastUpdated?: Date | null;
+  onSettingsOpen?: () => void;
 }) {
   return (
     <header
@@ -544,6 +1023,17 @@ function AppHeader({
               ) : (
                 <Moon className="w-3.5 h-3.5" />
               )}
+            </button>
+          )}
+          {onSettingsOpen && (
+            <button
+              data-ocid="header.settings_button"
+              type="button"
+              onClick={onSettingsOpen}
+              title="Settings"
+              className="h-7 w-7 flex items-center justify-center rounded border border-border text-muted-foreground hover:text-foreground hover:border-foreground/30 transition-colors"
+            >
+              <Settings className="w-3.5 h-3.5" />
             </button>
           )}
         </div>
@@ -680,7 +1170,7 @@ function TabNav({
 }: { active: TabValue; onChange: (v: TabValue) => void }) {
   return (
     <div
-      className="flex overflow-x-auto hide-scrollbar border-b border-border"
+      className="flex-shrink-0 flex overflow-x-auto lg:overflow-x-visible hide-scrollbar border-b border-border relative z-50"
       style={{ background: "oklch(var(--background))" }}
     >
       {TABS.map((tab) => {
@@ -708,18 +1198,46 @@ function TabNav({
 }
 
 // ─── Orders Tab ───────────────────────────────────────────────────────────────
-function OrdersTab({ token }: { token: string }) {
+function OrdersTab({
+  token,
+  prefill,
+  onPrefillConsumed,
+  onBack,
+}: {
+  token: string;
+  prefill?: {
+    instrumentKey?: string;
+    txType?: "BUY" | "SELL";
+    price?: string;
+    quantity?: string;
+  } | null;
+  onPrefillConsumed?: () => void;
+  onBack?: () => void;
+}) {
   const [instrumentKey, setInstrumentKey] = useState("NSE_EQ|INE848E01016");
   const [txType, setTxType] = useState<"BUY" | "SELL">("BUY");
   const [orderType, setOrderType] = useState("MARKET");
-  const [product, setProduct] = useState("CNC");
-  const [quantity, setQuantity] = useState("");
+  const [product, setProduct] = useState("NRML");
+  const [qtyMode, setQtyMode] = useState<"QTY" | "LOTS">("LOTS");
+  const [quantity, setQuantity] = useState("1");
   const [price, setPrice] = useState("");
   const [triggerPrice, setTriggerPrice] = useState("");
   const [validity, setValidity] = useState("DAY");
   const [placing, setPlacing] = useState(false);
+  const [orderFormDepth, setOrderFormDepth] = useState<{
+    bids: Array<{ price: number; quantity: number }>;
+    asks: Array<{ price: number; quantity: number }>;
+  } | null>(null);
+  const [orderFormDepthLoading, setOrderFormDepthLoading] = useState(false);
+  const [requiredMargin, setRequiredMargin] = useState<number | null>(null);
+  const [isEstimatedMargin, setIsEstimatedMargin] = useState(false);
+  const [availableMargin, setAvailableMargin] = useState<number | null>(null);
+  const [marginLoading, setMarginLoading] = useState(false);
   const [orders, setOrders] = useState<Order[]>([]);
   const [loadingOrders, setLoadingOrders] = useState(false);
+  const [orderStatusFilter, setOrderStatusFilter] = useState<
+    "ALL" | "PENDING" | "SUCCESS" | "CANCELLED"
+  >("ALL");
 
   const fetchOrders = useCallback(async () => {
     setLoadingOrders(true);
@@ -735,18 +1253,197 @@ function OrdersTab({ token }: { token: string }) {
     return () => clearInterval(id);
   }, [fetchOrders]);
 
+  useEffect(() => {
+    if (!token || !instrumentKey) return;
+    let cancelled = false;
+    const parseDepth = (quote: any) => {
+      if (!quote?.depth) return null;
+      return {
+        bids: (quote.depth.buy || [])
+          .slice(0, 5)
+          .map((b: any) => ({ price: b.price, quantity: b.quantity })),
+        asks: (quote.depth.sell || [])
+          .slice(0, 5)
+          .map((a: any) => ({ price: a.price, quantity: a.quantity })),
+      };
+    };
+    const fetchDepth = async () => {
+      try {
+        const encoded = encodeURIComponent(instrumentKey);
+        const res = await fetch(
+          `https://api.upstox.com/v2/market-quote/depth?instrument_key=${encoded}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: "application/json",
+            },
+          },
+        );
+        const data = await res.json();
+        if (!cancelled && data?.data) {
+          const quote =
+            data.data[instrumentKey] ||
+            data.data[decodeURIComponent(instrumentKey)] ||
+            (Object.values(data.data)[0] as any);
+          const depth = parseDepth(quote);
+          if (depth) {
+            setOrderFormDepth(depth);
+            setOrderFormDepthLoading(false);
+            return;
+          }
+        }
+        // Fallback to quotes endpoint
+        const res2 = await fetch(
+          `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${encoded}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: "application/json",
+            },
+          },
+        );
+        const data2 = await res2.json();
+        if (!cancelled && data2?.data) {
+          const quote2 =
+            data2.data[instrumentKey] ||
+            data2.data[decodeURIComponent(instrumentKey)] ||
+            (Object.values(data2.data)[0] as any);
+          const depth2 = parseDepth(quote2);
+          if (depth2) {
+            setOrderFormDepth(depth2);
+            setOrderFormDepthLoading(false);
+            return;
+          }
+        }
+        if (!cancelled) setOrderFormDepthLoading(false);
+      } catch {
+        if (!cancelled) setOrderFormDepthLoading(false);
+      }
+    };
+    setOrderFormDepthLoading(true);
+    fetchDepth();
+    const interval = setInterval(fetchDepth, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [token, instrumentKey]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: prefill is intentional one-shot
+  useEffect(() => {
+    if (prefill) {
+      if (prefill.instrumentKey) setInstrumentKey(prefill.instrumentKey);
+      if (prefill.txType) setTxType(prefill.txType);
+      if (prefill.price) {
+        setPrice(prefill.price);
+        setOrderType("LIMIT");
+      }
+      if (prefill.quantity) setQuantity(prefill.quantity);
+      onPrefillConsumed?.();
+    }
+  }, [prefill]);
+
+  // Reset quantity to "1" lot when instrument changes
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional reset
+  useEffect(() => {
+    if (qtyMode === "LOTS") setQuantity("1");
+  }, [instrumentKey, qtyMode]);
+
+  // Fetch available margin on token load
+  useEffect(() => {
+    if (!token) return;
+    upstoxFetch<any>("/v2/user/get-funds-and-margin", token).then((res) => {
+      if (res.data) {
+        const d = res.data?.equity ?? res.data;
+        setAvailableMargin(d.available_margin ?? d.available_balance ?? 0);
+      }
+    });
+  }, [token]);
+
+  // Fetch required margin when order params change (debounced 500ms)
+  useEffect(() => {
+    if (!token || !instrumentKey || !quantity) return;
+    const actualQty =
+      qtyMode === "LOTS"
+        ? Number.parseInt(quantity || "1") * getLotSize(instrumentKey)
+        : Number.parseInt(quantity || "0");
+    if (!actualQty) return;
+    const timer = setTimeout(async () => {
+      setMarginLoading(true);
+      try {
+        const res = await upstoxFetch<any>("/v2/order/margin", token, {
+          method: "POST",
+          body: [
+            {
+              instrument_key: instrumentKey,
+              transaction_type: txType,
+              quantity: actualQty,
+              price: Number.parseFloat(price) || 0,
+              product,
+              order_type: orderType,
+            },
+          ],
+        });
+        if (res.data?.required_margin !== undefined)
+          setRequiredMargin(res.data.required_margin);
+        else if (
+          Array.isArray(res.data) &&
+          res.data[0]?.required_margin !== undefined
+        ) {
+          setRequiredMargin(res.data[0].required_margin);
+          setIsEstimatedMargin(false);
+        } else {
+          const ltpFallback = Number.parseFloat(price) || 0;
+          const actualQtyFallback =
+            qtyMode === "LOTS"
+              ? Number.parseInt(quantity || "1") * getLotSize(instrumentKey)
+              : Number.parseInt(quantity || "0");
+          if (ltpFallback > 0 && actualQtyFallback > 0) {
+            setRequiredMargin(actualQtyFallback * ltpFallback);
+            setIsEstimatedMargin(true);
+          }
+        }
+      } catch {
+        const ltpFallback = Number.parseFloat(price) || 0;
+        const actualQtyFallback =
+          qtyMode === "LOTS"
+            ? Number.parseInt(quantity || "1") * getLotSize(instrumentKey)
+            : Number.parseInt(quantity || "0");
+        if (ltpFallback > 0 && actualQtyFallback > 0) {
+          setRequiredMargin(actualQtyFallback * ltpFallback);
+          setIsEstimatedMargin(true);
+        }
+      }
+      setMarginLoading(false);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [
+    token,
+    instrumentKey,
+    txType,
+    orderType,
+    product,
+    quantity,
+    price,
+    qtyMode,
+  ]);
+
   const placeOrder = async () => {
     if (!instrumentKey.trim() || !quantity) {
       toast.error("Instrument key and quantity are required");
       return;
     }
     setPlacing(true);
+    const actualQty =
+      qtyMode === "LOTS"
+        ? Number.parseInt(quantity || "1") * getLotSize(instrumentKey)
+        : Number.parseInt(quantity, 10);
     const body: any = {
       instrument_token: instrumentKey.trim(),
       transaction_type: txType,
       order_type: orderType,
       product,
-      quantity: Number.parseInt(quantity, 10),
+      quantity: actualQty,
       validity,
       tag: "upstox-connect",
     };
@@ -777,6 +1474,19 @@ function OrdersTab({ token }: { token: string }) {
 
   return (
     <div className="space-y-0">
+      {/* Back to Options link when pre-filled from option chain */}
+      {prefill && onBack && (
+        <div className="px-4 pt-3 pb-1">
+          <button
+            data-ocid="orders.back_button"
+            type="button"
+            onClick={onBack}
+            className="flex items-center gap-1.5 text-xs text-primary hover:underline font-medium"
+          >
+            ← Back to Options
+          </button>
+        </div>
+      )}
       {/* Order Form */}
       <div className="p-4 border-b border-border">
         <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase mb-3">
@@ -827,17 +1537,84 @@ function OrdersTab({ token }: { token: string }) {
 
           <div className="grid grid-cols-2 gap-2">
             <div>
-              <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                Qty
-              </Label>
-              <Input
-                data-ocid="orders.qty_input"
-                type="number"
-                placeholder="0"
-                value={quantity}
-                onChange={(e) => setQuantity(e.target.value)}
-                className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs"
-              />
+              <div className="flex items-center gap-2 mb-1">
+                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                  Qty
+                </Label>
+                <div className="flex rounded overflow-hidden border border-border text-[9px]">
+                  <button
+                    data-ocid="orders.qty_mode_lots"
+                    type="button"
+                    onClick={() => {
+                      setQtyMode("LOTS");
+                      setQuantity("1");
+                    }}
+                    className={`px-2 py-0.5 font-bold transition-colors ${qtyMode === "LOTS" ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground"}`}
+                  >
+                    LOTS
+                  </button>
+                  <button
+                    data-ocid="orders.qty_mode_qty"
+                    type="button"
+                    onClick={() => {
+                      setQtyMode("QTY");
+                      setQuantity(String(getLotSize(instrumentKey)));
+                    }}
+                    className={`px-2 py-0.5 font-bold transition-colors ${qtyMode === "QTY" ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground"}`}
+                  >
+                    QTY
+                  </button>
+                </div>
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  data-ocid="orders.qty_decrease_button"
+                  type="button"
+                  onClick={() => {
+                    const step =
+                      qtyMode === "LOTS" ? 1 : getLotSize(instrumentKey);
+                    setQuantity(
+                      String(
+                        Math.max(
+                          qtyMode === "LOTS" ? 1 : 0,
+                          Number.parseInt(quantity || "1") - step,
+                        ),
+                      ),
+                    );
+                  }}
+                  className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
+                >
+                  −
+                </button>
+                <input
+                  data-ocid="orders.qty_input"
+                  type="number"
+                  value={quantity}
+                  onChange={(e) => setQuantity(e.target.value)}
+                  className="h-8 flex-1 bg-secondary border border-border text-foreground text-xs rounded px-2 text-center font-mono min-w-0"
+                  placeholder={qtyMode === "LOTS" ? "1" : "0"}
+                />
+                <button
+                  data-ocid="orders.qty_increase_button"
+                  type="button"
+                  onClick={() => {
+                    const step =
+                      qtyMode === "LOTS" ? 1 : getLotSize(instrumentKey);
+                    setQuantity(
+                      String(Number.parseInt(quantity || "0") + step),
+                    );
+                  }}
+                  className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
+                >
+                  +
+                </button>
+              </div>
+              {qtyMode === "LOTS" && (
+                <p className="text-[9px] text-muted-foreground mt-0.5">
+                  1 lot = {getLotSize(instrumentKey)} · actual:{" "}
+                  {Number.parseInt(quantity || "1") * getLotSize(instrumentKey)}
+                </p>
+              )}
             </div>
             <div>
               <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
@@ -934,6 +1711,135 @@ function OrdersTab({ token }: { token: string }) {
         </div>
       </div>
 
+      {/* Market Depth in Order Form */}
+      <div className="mx-4 mb-3 border border-border rounded">
+        <div className="flex items-center justify-between px-2 py-1 border-b border-border bg-secondary/50">
+          <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+            Market Depth
+          </span>
+          {orderFormDepthLoading && (
+            <span className="text-[9px] text-muted-foreground">Loading...</span>
+          )}
+        </div>
+        {!orderFormDepthLoading && !orderFormDepth && (
+          <div className="px-3 py-2 text-[10px] text-muted-foreground italic">
+            Depth unavailable (CORS/API)
+          </div>
+        )}
+        <div className="grid grid-cols-2 divide-x divide-border">
+          <div>
+            <div className="grid grid-cols-2 px-2 py-0.5 border-b border-border">
+              <span className="text-[9px] text-muted-foreground">BID QTY</span>
+              <span className="text-[9px] text-muted-foreground text-right">
+                BID
+              </span>
+            </div>
+            {(orderFormDepth?.bids || Array(5).fill(null)).map((b, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: depth rows are positional
+              <div key={`bid-${i}`} className="grid grid-cols-2 px-2 py-0.5">
+                <span className="text-[10px] text-green-500 font-mono">
+                  {b ? b.quantity : "—"}
+                </span>
+                <span className="text-[10px] text-green-500 font-mono text-right">
+                  {b ? b.price.toFixed(2) : "—"}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div>
+            <div className="grid grid-cols-2 px-2 py-0.5 border-b border-border">
+              <span className="text-[9px] text-muted-foreground">ASK</span>
+              <span className="text-[9px] text-muted-foreground text-right">
+                ASK QTY
+              </span>
+            </div>
+            {(orderFormDepth?.asks || Array(5).fill(null)).map((a, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: depth rows are positional
+              <div key={`ask-${i}`} className="grid grid-cols-2 px-2 py-0.5">
+                <span className="text-[10px] text-red-500 font-mono">
+                  {a ? a.price.toFixed(2) : "—"}
+                </span>
+                <span className="text-[10px] text-red-500 font-mono text-right">
+                  {a ? a.quantity : "—"}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+        {orderFormDepth && (
+          <div className="px-2 py-1 border-t border-border">
+            {(() => {
+              const totalBid = orderFormDepth.bids.reduce(
+                (s, b) => s + b.quantity,
+                0,
+              );
+              const totalAsk = orderFormDepth.asks.reduce(
+                (s, a) => s + a.quantity,
+                0,
+              );
+              const total = totalBid + totalAsk || 1;
+              const bidPct = Math.round((totalBid / total) * 100);
+              return (
+                <div>
+                  <div className="flex justify-between text-[9px] mb-0.5">
+                    <span className="text-green-500">Buy {bidPct}%</span>
+                    <span className="text-red-500">Sell {100 - bidPct}%</span>
+                  </div>
+                  <div className="h-1 rounded-full bg-red-500 overflow-hidden">
+                    <div
+                      className="h-full bg-green-500 rounded-full"
+                      style={{ width: `${bidPct}%` }}
+                    />
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        )}
+      </div>
+
+      {/* Margin Info */}
+      <div
+        data-ocid="orders.margin_panel"
+        className="mx-4 mb-3 border border-border rounded"
+      >
+        <div className="px-2 py-1 border-b border-border bg-secondary/50">
+          <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+            Margin
+          </span>
+        </div>
+        <div className="grid grid-cols-2 divide-x divide-border">
+          <div className="px-3 py-2">
+            <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">
+              {isEstimatedMargin ? "Est. Margin" : "Req. Margin"}
+            </div>
+            <div
+              data-ocid="orders.required_margin"
+              className="text-xs font-mono font-bold text-amber-400"
+            >
+              {marginLoading
+                ? "..."
+                : requiredMargin !== null
+                  ? `₹${requiredMargin.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                  : "—"}
+            </div>
+          </div>
+          <div className="px-3 py-2">
+            <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">
+              Available
+            </div>
+            <div
+              data-ocid="orders.available_margin"
+              className={`text-xs font-mono font-bold ${availableMargin !== null && requiredMargin !== null && availableMargin < requiredMargin ? "text-red-500" : "text-green-500"}`}
+            >
+              {availableMargin !== null
+                ? `₹${availableMargin.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                : "—"}
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Order Book */}
       <div className="p-3">
         <div className="flex items-center justify-between mb-2">
@@ -949,6 +1855,25 @@ function OrdersTab({ token }: { token: string }) {
               className={`w-3 h-3 ${loadingOrders ? "animate-spin" : ""}`}
             />
           </button>
+        </div>
+
+        {/* Filter tabs */}
+        <div className="flex gap-1 mb-2 overflow-x-auto hide-scrollbar">
+          {(["ALL", "PENDING", "SUCCESS", "CANCELLED"] as const).map((f) => (
+            <button
+              key={f}
+              type="button"
+              data-ocid={`orders.filter.${f.toLowerCase()}.tab`}
+              onClick={() => setOrderStatusFilter(f)}
+              className={`flex-none px-2.5 py-1 rounded text-[10px] font-bold whitespace-nowrap transition-colors ${
+                orderStatusFilter === f
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-secondary text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {f === "SUCCESS" ? "FILLED" : f}
+            </button>
+          ))}
         </div>
 
         {loadingOrders ? (
@@ -987,46 +1912,68 @@ function OrdersTab({ token }: { token: string }) {
                 </tr>
               </thead>
               <tbody>
-                {orders.map((order, i) => (
-                  <tr
-                    key={order.order_id}
-                    data-ocid={`orders.row.${i + 1}`}
-                    className="border-b border-border/50 hover:bg-secondary/40 transition-colors"
-                  >
-                    <td className="py-1.5 px-2">
-                      <p className="font-mono font-bold text-foreground text-xs">
-                        {order.tradingsymbol}
-                      </p>
-                      <p
-                        className={`text-[10px] font-bold ${
-                          order.transaction_type === "BUY"
-                            ? "text-blue-400"
-                            : "text-loss"
-                        }`}
-                      >
-                        {order.transaction_type}
-                      </p>
-                    </td>
-                    <td className="py-1.5 px-2 text-right font-mono-data text-foreground">
-                      {order.quantity}
-                    </td>
-                    <td className="py-1.5 px-2 text-right font-mono-data text-foreground">
-                      ₹{(order.price || order.average_price || 0).toFixed(2)}
-                    </td>
-                    <td className="py-1.5 px-2 text-center">
-                      <span className="text-[10px] font-mono text-muted-foreground">
-                        {order.order_type}
-                      </span>
-                    </td>
-                    <td className="py-1.5 px-2 text-center">
-                      <span
-                        className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${statusBadge(order.status)}`}
-                      >
-                        {order.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
+                {orders
+                  .filter((o) => {
+                    if (orderStatusFilter === "ALL") return true;
+                    if (orderStatusFilter === "PENDING")
+                      return [
+                        "open",
+                        "pending",
+                        "trigger pending",
+                        "after market order req received",
+                        "modify pending",
+                        "cancel pending",
+                      ].some((s) => o.status.toLowerCase().includes(s));
+                    if (orderStatusFilter === "SUCCESS")
+                      return ["complete", "traded", "filled"].some((s) =>
+                        o.status.toLowerCase().includes(s),
+                      );
+                    if (orderStatusFilter === "CANCELLED")
+                      return ["cancelled", "rejected"].some((s) =>
+                        o.status.toLowerCase().includes(s),
+                      );
+                    return true;
+                  })
+                  .map((order, i) => (
+                    <tr
+                      key={order.order_id}
+                      data-ocid={`orders.row.${i + 1}`}
+                      className="border-b border-border/50 hover:bg-secondary/40 transition-colors"
+                    >
+                      <td className="py-1.5 px-2">
+                        <p className="font-mono font-bold text-foreground text-xs">
+                          {order.tradingsymbol}
+                        </p>
+                        <p
+                          className={`text-[10px] font-bold ${
+                            order.transaction_type === "BUY"
+                              ? "text-blue-400"
+                              : "text-loss"
+                          }`}
+                        >
+                          {order.transaction_type}
+                        </p>
+                      </td>
+                      <td className="py-1.5 px-2 text-right font-mono-data text-foreground">
+                        {order.quantity}
+                      </td>
+                      <td className="py-1.5 px-2 text-right font-mono-data text-foreground">
+                        ₹{(order.price || order.average_price || 0).toFixed(2)}
+                      </td>
+                      <td className="py-1.5 px-2 text-center">
+                        <span className="text-[10px] font-mono text-muted-foreground">
+                          {order.order_type}
+                        </span>
+                      </td>
+                      <td className="py-1.5 px-2 text-center">
+                        <span
+                          className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${statusBadge(order.status)}`}
+                        >
+                          {order.status}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
               </tbody>
             </table>
           </div>
@@ -1753,11 +2700,13 @@ function TrendAnalysisPanel({
   underlyingLtp,
   expiries,
   selectedExpiry,
+  tradeSettings,
 }: {
   chain: OptionData[];
   underlyingLtp: number;
   expiries?: string[];
   selectedExpiry?: string;
+  tradeSettings?: TradeSettings;
 }) {
   if (chain.length === 0) return null;
 
@@ -1993,7 +2942,7 @@ function TrendAnalysisPanel({
             <p className="text-[9px] text-muted-foreground mb-0.5 uppercase tracking-wider">
               Strike Price
             </p>
-            <p className="font-mono-data text-xl font-black text-white">
+            <p className="font-mono-data text-xl font-black text-foreground">
               {recommendedStrike > 0
                 ? recommendedStrike.toLocaleString("en-IN")
                 : "—"}
@@ -2003,7 +2952,7 @@ function TrendAnalysisPanel({
             <p className="text-[9px] text-muted-foreground mb-0.5 uppercase tracking-wider">
               Expiry
             </p>
-            <p className="font-mono-data text-sm font-bold text-white">
+            <p className="font-mono-data text-sm font-bold text-foreground">
               {autoExpiry}
             </p>
           </div>
@@ -2012,13 +2961,13 @@ function TrendAnalysisPanel({
         {/* Entry / SL / Target */}
         {recLtp > 0 &&
           (() => {
-            const slPct = 0.25; // 25% SL for options
+            const slPct = (tradeSettings?.slPct ?? 25) / 100;
             const sl = recLtp * (1 - slPct);
             const risk = recLtp - sl;
-            const target1 = recLtp + risk * 2; // 1:2 R:R
-            const target2 = recLtp + risk * 3; // 1:3 R:R
+            const target1 = recLtp + risk * (tradeSettings?.tgt1RR ?? 2);
+            const target2 = recLtp + risk * (tradeSettings?.tgt2RR ?? 3);
             return (
-              <div className="flex mb-2 rounded-lg border border-white/15 bg-black/30 overflow-hidden">
+              <div className="flex mb-2 rounded-lg border border-border bg-card overflow-hidden">
                 <div className="flex-1 text-center py-2 px-1">
                   <p className="text-[8px] text-muted-foreground mb-1 uppercase tracking-widest font-semibold">
                     Buy Price
@@ -2027,7 +2976,7 @@ function TrendAnalysisPanel({
                     ₹{recLtp.toFixed(2)}
                   </p>
                 </div>
-                <div className="flex-1 text-center py-2 px-1 border-l border-white/10">
+                <div className="flex-1 text-center py-2 px-1 border-l border-border">
                   <p className="text-[8px] text-muted-foreground mb-1 uppercase tracking-widest font-semibold">
                     SL
                   </p>
@@ -2035,7 +2984,7 @@ function TrendAnalysisPanel({
                     ₹{sl.toFixed(2)}
                   </p>
                 </div>
-                <div className="flex-1 text-center py-2 px-1 border-l border-white/10">
+                <div className="flex-1 text-center py-2 px-1 border-l border-border">
                   <p className="text-[8px] text-muted-foreground mb-1 uppercase tracking-widest font-semibold">
                     TGT1
                   </p>
@@ -2043,7 +2992,7 @@ function TrendAnalysisPanel({
                     ₹{target1.toFixed(2)}
                   </p>
                 </div>
-                <div className="flex-1 text-center py-2 px-1 border-l border-white/10">
+                <div className="flex-1 text-center py-2 px-1 border-l border-border">
                   <p className="text-[8px] text-muted-foreground mb-1 uppercase tracking-widest font-semibold">
                     TGT2
                   </p>
@@ -2122,14 +3071,708 @@ function TrendAnalysisPanel({
   );
 }
 
+// ─── LTP Hover Popup ──────────────────────────────────────────────────────────
+interface MarketDepthEntry {
+  price: number;
+  quantity: number;
+  orders?: number;
+}
+
+interface LtpSidePanelProps {
+  instrumentKey: string;
+  ltp: number;
+  side: "CE" | "PE";
+  strikePrice: number;
+  token: string;
+  onClose: () => void;
+  onBuy: (instrumentKey: string, ltp: number) => void;
+  onSell: (instrumentKey: string, ltp: number) => void;
+}
+
+// ─── LTP Side Panel Sub-components (memoized to avoid full re-render every second) ─
+const LiveLtpDisplay = memo(function LiveLtpDisplay({
+  liveLtp,
+  ohlc,
+  change,
+  changePct,
+  isPositive,
+}: {
+  liveLtp: number;
+  ohlc: {
+    open: number;
+    prev_close: number;
+    high: number;
+    low: number;
+    volume?: number;
+    avg_price?: number;
+    lower_circuit?: number;
+    upper_circuit?: number;
+  } | null;
+  change: number;
+  changePct: number;
+  isPositive: boolean;
+}) {
+  return (
+    <>
+      <div className="font-mono-data text-xl font-bold text-foreground mt-0.5">
+        {liveLtp.toFixed(2)}
+      </div>
+      {ohlc && (
+        <div
+          className="font-mono-data text-xs mt-0.5"
+          style={{
+            color: isPositive ? "oklch(0.64 0.2 145)" : "oklch(0.62 0.22 22)",
+          }}
+        >
+          {isPositive ? "+" : ""}
+          {change.toFixed(2)} ({isPositive ? "+" : ""}
+          {changePct.toFixed(2)}%)
+        </div>
+      )}
+    </>
+  );
+});
+
+const DepthRows = memo(function DepthRows({
+  depth,
+}: {
+  depth: { bids: MarketDepthEntry[]; asks: MarketDepthEntry[] } | null;
+}) {
+  if (!depth) return null;
+  const totalBidQty = depth.bids.reduce((s, b) => s + (b.quantity ?? 0), 0);
+  const totalAskQty = depth.asks.reduce((s, a) => s + (a.quantity ?? 0), 0);
+  const totalQty = totalBidQty + totalAskQty;
+  const bidPct = totalQty > 0 ? Math.round((totalBidQty / totalQty) * 100) : 50;
+  const maxBidQty = Math.max(...depth.bids.map((b) => b.quantity ?? 0), 1);
+  const maxAskQty = Math.max(...depth.asks.map((a) => a.quantity ?? 0), 1);
+
+  return (
+    <>
+      {/* Header */}
+      <div className="grid grid-cols-4 text-[10px] text-muted-foreground font-semibold mb-1 px-1">
+        <div className="text-right">Qty</div>
+        <div className="text-right">Bid</div>
+        <div className="text-left pl-1">Ask</div>
+        <div className="text-left pl-1">Qty</div>
+      </div>
+      {/* Rows */}
+      {Array.from({ length: 5 }).map((_, i) => {
+        const bid = depth.bids[i];
+        const ask = depth.asks[i];
+        const bidBarPct = bid ? (bid.quantity / maxBidQty) * 100 : 0;
+        const askBarPct = ask ? (ask.quantity / maxAskQty) * 100 : 0;
+        return (
+          <div
+            key={`${bid?.price ?? "b"}-${ask?.price ?? "a"}-${i}`}
+            className="grid grid-cols-4 text-[11px] font-mono-data py-0.5 relative"
+          >
+            {/* Bid qty with green bar */}
+            <div className="text-right pr-1 relative">
+              <div
+                className="absolute right-0 top-0 h-full rounded-sm"
+                style={{
+                  width: `${bidBarPct}%`,
+                  background: "oklch(0.64 0.2 145 / 0.15)",
+                }}
+              />
+              <span
+                className="relative"
+                style={{ color: "oklch(0.64 0.2 145)" }}
+              >
+                {bid?.quantity?.toLocaleString("en-IN") ?? "—"}
+              </span>
+            </div>
+            {/* Bid price */}
+            <div
+              className="text-right pr-1"
+              style={{ color: "oklch(0.64 0.2 145)" }}
+            >
+              {bid?.price?.toFixed(2) ?? "—"}
+            </div>
+            {/* Ask price */}
+            <div
+              className="text-left pl-1"
+              style={{ color: "oklch(0.62 0.22 22)" }}
+            >
+              {ask?.price?.toFixed(2) ?? "—"}
+            </div>
+            {/* Ask qty with red bar */}
+            <div className="text-left pl-1 relative">
+              <div
+                className="absolute left-0 top-0 h-full rounded-sm"
+                style={{
+                  width: `${askBarPct}%`,
+                  background: "oklch(0.62 0.22 22 / 0.15)",
+                }}
+              />
+              <span
+                className="relative"
+                style={{ color: "oklch(0.62 0.22 22)" }}
+              >
+                {ask?.quantity?.toLocaleString("en-IN") ?? "—"}
+              </span>
+            </div>
+          </div>
+        );
+      })}
+      {/* Totals */}
+      <div className="mt-2 pt-2 border-t border-border/50">
+        <div className="flex justify-between text-[10px] font-mono-data mb-1">
+          <span style={{ color: "oklch(0.64 0.2 145)" }}>
+            {bidPct}% ({totalBidQty.toLocaleString("en-IN")})
+          </span>
+          <span className="text-muted-foreground text-[9px]">Total</span>
+          <span style={{ color: "oklch(0.62 0.22 22)" }}>
+            ({totalAskQty.toLocaleString("en-IN")}) {100 - bidPct}%
+          </span>
+        </div>
+        {/* Split bar */}
+        <div
+          className="h-1.5 rounded-full overflow-hidden flex"
+          style={{ background: "oklch(var(--secondary))" }}
+        >
+          <div
+            className="h-full transition-all duration-500"
+            style={{ width: `${bidPct}%`, background: "oklch(0.64 0.2 145)" }}
+          />
+          <div
+            className="h-full transition-all duration-500"
+            style={{
+              width: `${100 - bidPct}%`,
+              background: "oklch(0.62 0.22 22)",
+            }}
+          />
+        </div>
+      </div>
+    </>
+  );
+});
+
+function LtpSidePanel({
+  instrumentKey,
+  ltp,
+  side,
+  strikePrice,
+  token,
+  onClose,
+  onBuy,
+  onSell,
+}: LtpSidePanelProps) {
+  const [depth, setDepth] = useState<{
+    bids: MarketDepthEntry[];
+    asks: MarketDepthEntry[];
+  } | null>(null);
+  const [ohlc, setOhlc] = useState<{
+    open: number;
+    prev_close: number;
+    high: number;
+    low: number;
+    volume?: number;
+    avg_price?: number;
+    lower_circuit?: number;
+    upper_circuit?: number;
+  } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [depthLoading, setDepthLoading] = useState(true);
+  const [statsOpen, setStatsOpen] = useState(true);
+  const [depthOpen, setDepthOpen] = useState(true);
+  const [visible, setVisible] = useState(false);
+  const [liveLtp, setLiveLtp] = useState(ltp);
+
+  // Derive symbol label from instrumentKey + strikePrice + side
+  const symbolLabel = (() => {
+    const parts = instrumentKey.split("|");
+    const seg = parts[1] ?? instrumentKey;
+    // Try to extract underlying name from segment e.g. NIFTY23500CE
+    const match = seg.match(/^([A-Z]+)\d/);
+    const underlying = match ? match[1] : seg.split(/\d/)[0];
+    return `${underlying} ${strikePrice.toLocaleString("en-IN")} ${side}`;
+  })();
+
+  const change = ohlc ? liveLtp - ohlc.prev_close : 0;
+  const changePct =
+    ohlc && ohlc.prev_close > 0 ? (change / ohlc.prev_close) * 100 : 0;
+  const isPositive = change >= 0;
+
+  useEffect(() => {
+    // slide in after mount
+    const t = setTimeout(() => setVisible(true), 10);
+    return () => clearTimeout(t);
+  }, []);
+
+  // Live LTP + depth polling every 1 second
+  useEffect(() => {
+    if (!token || !instrumentKey) return;
+    const encoded = encodeURIComponent(instrumentKey);
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    };
+
+    async function poll() {
+      try {
+        // Fetch live LTP
+        const ltpRes = await fetch(
+          `https://api.upstox.com/v2/market-quote/ltp?instrument_key=${encoded}`,
+          { headers },
+        );
+        if (ltpRes.ok) {
+          const d = await ltpRes.json();
+          const key = Object.keys(d?.data ?? {})[0];
+          const lastPrice = d?.data?.[key]?.last_price;
+          if (lastPrice) setLiveLtp(lastPrice);
+        }
+      } catch {}
+      try {
+        // Fetch market depth — try depth endpoint first, fall back to full quotes
+        function parseDepthFromResponse(d: Record<string, unknown>) {
+          const key = Object.keys(
+            (d?.data as Record<string, unknown>) ?? {},
+          )[0];
+          const keyData =
+            (d?.data as Record<string, Record<string, unknown>>)?.[key] ?? {};
+          const rawDepth = (keyData?.depth ??
+            keyData?.market_level ??
+            keyData) as Record<string, unknown> | null;
+          if (!rawDepth) return null;
+          // Normalise each entry to {price, quantity, orders}
+          function normalise(
+            arr: unknown[],
+          ): { price: number; quantity: number; orders?: number }[] {
+            return arr
+              .map((e) => {
+                const entry = e as Record<string, unknown>;
+                return {
+                  price: Number(
+                    entry?.price ?? entry?.bid_price ?? entry?.ask_price ?? 0,
+                  ),
+                  quantity: Number(
+                    entry?.quantity ??
+                      entry?.bid_quantity ??
+                      entry?.ask_quantity ??
+                      entry?.vol ??
+                      0,
+                  ),
+                  orders:
+                    entry?.orders != null ? Number(entry.orders) : undefined,
+                };
+              })
+              .filter((e) => e.price > 0 || e.quantity > 0);
+          }
+          const bids = normalise(
+            (rawDepth?.buy ?? rawDepth?.bid ?? []) as unknown[],
+          ).slice(0, 5);
+          const asks = normalise(
+            (rawDepth?.sell ?? rawDepth?.ask ?? []) as unknown[],
+          ).slice(0, 5);
+          return { bids, asks };
+        }
+
+        let depthParsed: {
+          bids: { price: number; quantity: number; orders?: number }[];
+          asks: { price: number; quantity: number; orders?: number }[];
+        } | null = null;
+
+        // Primary: depth endpoint
+        try {
+          const depthRes = await fetch(
+            `https://api.upstox.com/v2/market-quote/depth?instrument_key=${encoded}&mode=full`,
+            { headers },
+          );
+          if (depthRes.ok) {
+            const d = await depthRes.json();
+            depthParsed = parseDepthFromResponse(d);
+          }
+        } catch {}
+
+        // Fallback: full quotes endpoint (includes depth)
+        if (
+          !depthParsed ||
+          (depthParsed.bids.length === 0 && depthParsed.asks.length === 0)
+        ) {
+          try {
+            const quotesRes = await fetch(
+              `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${encoded}&mode=full`,
+              { headers },
+            );
+            if (quotesRes.ok) {
+              const d = await quotesRes.json();
+              depthParsed = parseDepthFromResponse(d);
+            }
+          } catch {}
+        }
+
+        if (depthParsed) {
+          setDepth(depthParsed);
+        }
+      } catch {}
+      setDepthLoading(false);
+    }
+
+    poll();
+    const interval = setInterval(poll, 1000);
+    return () => clearInterval(interval);
+  }, [instrumentKey, token]);
+
+  useEffect(() => {
+    async function fetchData() {
+      if (!token || !instrumentKey) return;
+      setLoading(true);
+      try {
+        const encoded = encodeURIComponent(instrumentKey);
+        const headers = {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        };
+        const ohlcRes = await fetch(
+          `https://api.upstox.com/v2/market-quote/ohlc?instrument_key=${encoded}&interval=1d`,
+          { headers },
+        );
+        if (ohlcRes.ok) {
+          const o = await ohlcRes.json();
+          const key = Object.keys(o?.data ?? {})[0];
+          const q = o?.data?.[key]?.ohlc;
+          const pc =
+            o?.data?.[key]?.prev_close_price ?? o?.data?.[key]?.previous_close;
+          const lc =
+            o?.data?.[key]?.lower_circuit_limit ??
+            o?.data?.[key]?.lower_circuit;
+          const uc =
+            o?.data?.[key]?.upper_circuit_limit ??
+            o?.data?.[key]?.upper_circuit;
+          const vol =
+            o?.data?.[key]?.volume ?? o?.data?.[key]?.total_traded_volume;
+          const avgPx =
+            o?.data?.[key]?.average_trade_price ??
+            o?.data?.[key]?.avg_traded_price;
+          if (q)
+            setOhlc({
+              open: q.open,
+              prev_close: pc ?? 0,
+              high: q.high,
+              low: q.low,
+              volume: vol,
+              avg_price: avgPx,
+              lower_circuit: lc,
+              upper_circuit: uc,
+            });
+        }
+      } catch {}
+      setLoading(false);
+    }
+    fetchData();
+  }, [instrumentKey, token]);
+
+  return (
+    <>
+      {/* Overlay */}
+      <div
+        className="fixed inset-0 z-30 bg-black/40"
+        onClick={onClose}
+        onKeyDown={(e) => e.key === "Escape" && onClose()}
+        aria-hidden="true"
+      />
+      {/* Panel */}
+      <div
+        data-ocid="ltp_panel.sheet"
+        className="fixed right-0 top-0 h-full z-50 w-80 flex flex-col overflow-hidden shadow-2xl transition-transform duration-300"
+        style={{
+          background: "oklch(var(--card))",
+          borderLeft: "1px solid oklch(var(--border))",
+          transform: visible ? "translateX(0)" : "translateX(100%)",
+        }}
+      >
+        {/* Header */}
+        <div
+          className="flex items-start justify-between p-4 border-b border-border shrink-0"
+          style={{ background: "oklch(var(--background))" }}
+        >
+          <button
+            data-ocid="ltp_panel.close_button"
+            type="button"
+            onClick={onClose}
+            className="p-1 rounded hover:bg-secondary transition-colors mr-3 mt-0.5"
+            aria-label="Close panel"
+          >
+            <X className="w-4 h-4 text-muted-foreground" />
+          </button>
+          <div className="flex-1 min-w-0">
+            <div className="font-bold text-sm text-foreground truncate">
+              {symbolLabel}
+            </div>
+            <LiveLtpDisplay
+              liveLtp={liveLtp}
+              ohlc={ohlc}
+              change={change}
+              changePct={changePct}
+              isPositive={isPositive}
+            />
+          </div>
+        </div>
+
+        {/* Buy / Sell buttons */}
+        <div className="flex gap-2 p-3 border-b border-border shrink-0">
+          <button
+            data-ocid="ltp_panel.buy_button"
+            type="button"
+            onClick={() => {
+              onBuy(instrumentKey, liveLtp);
+              onClose();
+            }}
+            className="flex-1 py-2.5 rounded font-bold text-sm text-white transition-opacity hover:opacity-90"
+            style={{ background: "oklch(0.55 0.18 145)" }}
+          >
+            BUY
+          </button>
+          <button
+            data-ocid="ltp_panel.sell_button"
+            type="button"
+            onClick={() => {
+              onSell(instrumentKey, liveLtp);
+              onClose();
+            }}
+            className="flex-1 py-2.5 rounded font-bold text-sm text-white transition-opacity hover:opacity-90"
+            style={{ background: "oklch(0.55 0.22 22)" }}
+          >
+            SELL
+          </button>
+        </div>
+
+        {/* Scrollable content */}
+        <div className="flex-1 overflow-y-auto">
+          {/* Market Stats */}
+          <div className="border-b border-border">
+            <button
+              type="button"
+              onClick={() => setStatsOpen((v) => !v)}
+              className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-bold text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <span>Market Stats</span>
+              <span className="text-muted-foreground">
+                {statsOpen ? "▲" : "▼"}
+              </span>
+            </button>
+            {statsOpen && (
+              <div className="px-4 pb-4 text-xs">
+                {loading ? (
+                  <div className="space-y-2">
+                    {[1, 2, 3].map((i) => (
+                      <div
+                        key={i}
+                        className="h-4 bg-secondary rounded animate-pulse"
+                      />
+                    ))}
+                  </div>
+                ) : ohlc ? (
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-2 gap-x-4">
+                      <div>
+                        <div className="text-muted-foreground text-[10px]">
+                          Open
+                        </div>
+                        <div className="font-mono-data font-semibold text-foreground">
+                          {ohlc.open.toFixed(2)}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-muted-foreground text-[10px]">
+                          Prev. Close
+                        </div>
+                        <div className="font-mono-data font-semibold text-foreground">
+                          {ohlc.prev_close.toFixed(2)}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-4">
+                      <div>
+                        <div className="text-muted-foreground text-[10px]">
+                          Low
+                        </div>
+                        <div
+                          className="font-mono-data font-semibold"
+                          style={{ color: "oklch(0.62 0.22 22)" }}
+                        >
+                          {ohlc.low.toFixed(2)}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-muted-foreground text-[10px]">
+                          High
+                        </div>
+                        <div
+                          className="font-mono-data font-semibold"
+                          style={{ color: "oklch(0.64 0.2 145)" }}
+                        >
+                          {ohlc.high.toFixed(2)}
+                        </div>
+                      </div>
+                    </div>
+                    {(ohlc.lower_circuit != null ||
+                      ohlc.upper_circuit != null) && (
+                      <div>
+                        <div className="text-muted-foreground text-[10px] mb-1">
+                          Circuit (Lower–Upper)
+                        </div>
+                        <div
+                          className="relative h-1.5 rounded-full overflow-hidden"
+                          style={{ background: "oklch(var(--secondary))" }}
+                        >
+                          {ohlc.lower_circuit != null &&
+                            ohlc.upper_circuit != null &&
+                            ohlc.upper_circuit > ohlc.lower_circuit && (
+                              <div
+                                className="absolute top-0 h-full rounded-full"
+                                style={{
+                                  left: `${((ltp - ohlc.lower_circuit) / (ohlc.upper_circuit - ohlc.lower_circuit)) * 100}%`,
+                                  width: "3px",
+                                  background: "oklch(0.72 0.18 75)",
+                                  transform: "translateX(-50%)",
+                                }}
+                              />
+                            )}
+                        </div>
+                        <div className="flex justify-between font-mono-data text-[10px] text-muted-foreground mt-0.5">
+                          <span>{ohlc.lower_circuit?.toFixed(2) ?? "—"}</span>
+                          <span>{ohlc.upper_circuit?.toFixed(2) ?? "—"}</span>
+                        </div>
+                      </div>
+                    )}
+                    {ohlc.volume != null && (
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground text-[10px]">
+                          Volume
+                        </span>
+                        <span className="font-mono-data text-foreground">
+                          {ohlc.volume.toLocaleString("en-IN")}
+                        </span>
+                      </div>
+                    )}
+                    {ohlc.avg_price != null && (
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground text-[10px]">
+                          Avg. traded price
+                        </span>
+                        <span className="font-mono-data text-foreground">
+                          {ohlc.avg_price.toFixed(2)}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-muted-foreground text-[10px] py-2 text-center">
+                    No data available
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Market Depth */}
+          <div>
+            <button
+              type="button"
+              onClick={() => setDepthOpen((v) => !v)}
+              className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-bold text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <span>Market Depth</span>
+              <span className="text-muted-foreground">
+                {depthOpen ? "▲" : "▼"}
+              </span>
+            </button>
+            {depthOpen && (
+              <div className="px-3 pb-4">
+                {depthLoading ? (
+                  <div className="space-y-1.5">
+                    {[1, 2, 3, 4, 5].map((i) => (
+                      <div
+                        key={i}
+                        className="h-5 bg-secondary rounded animate-pulse"
+                      />
+                    ))}
+                  </div>
+                ) : depth ? (
+                  <>
+                    <DepthRows depth={depth} />
+                  </>
+                ) : (
+                  <DepthRows depth={{ bids: [], asks: [] }} />
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+const OptionChainHeader = memo(function OptionChainHeader() {
+  return (
+    <thead className="sticky top-0 z-10">
+      <tr style={{ background: "oklch(var(--card))" }}>
+        <th
+          colSpan={4}
+          className="py-1.5 px-2 text-center text-[10px] font-bold tracking-wider border-b border-r border-border"
+          style={{
+            color: "oklch(0.64 0.2 145)",
+            background: "oklch(0.64 0.2 145 / 0.08)",
+          }}
+        >
+          CE
+        </th>
+        <th className="py-1.5 px-3 text-center text-[10px] text-muted-foreground font-bold border-b border-border">
+          STRIKE
+        </th>
+        <th
+          colSpan={4}
+          className="py-1.5 px-2 text-center text-[10px] font-bold tracking-wider border-b border-l border-border"
+          style={{
+            color: "oklch(0.62 0.22 22)",
+            background: "oklch(0.62 0.22 22 / 0.08)",
+          }}
+        >
+          PE
+        </th>
+      </tr>
+      <tr style={{ background: "oklch(var(--card))" }}>
+        {["LTP", "OI", "VOL", "IV%"].map((h) => (
+          <th
+            key={h}
+            className="py-1 px-2 text-right text-[10px] text-muted-foreground font-semibold border-b border-border"
+          >
+            {h}
+          </th>
+        ))}
+        <th className="py-1 px-2 border-b border-border" />
+        {["LTP", "OI", "VOL", "IV"].map((h) => (
+          <th
+            key={h}
+            className="py-1 px-2 text-left text-[10px] text-muted-foreground font-semibold border-b border-border"
+          >
+            {h}
+          </th>
+        ))}
+      </tr>
+    </thead>
+  );
+});
+
 function OptionChainTab({
   token,
   indexTicks,
   initialUnderlying,
+  tradeSettings,
+  onBuyStrike,
 }: {
   token: string;
   indexTicks: Record<string, TickData>;
   initialUnderlying?: string;
+  tradeSettings?: TradeSettings;
+  onBuyStrike?: (
+    instrumentKey: string,
+    ltp: number,
+    txType: "BUY" | "SELL",
+  ) => void;
 }) {
   const [underlying, setUnderlying] = useState<string>(
     initialUnderlying ?? "NSE_INDEX|Nifty 50",
@@ -2218,6 +3861,16 @@ function OptionChainTab({
     }
   }, [expiry]);
 
+  // Auto-refresh option chain LTP every 1 second
+  // biome-ignore lint/correctness/useExhaustiveDependencies: fetchChain is stable, intentional
+  useEffect(() => {
+    if (!expiry) return;
+    const id = setInterval(() => {
+      fetchChain();
+    }, 1000);
+    return () => clearInterval(id);
+  }, [expiry]);
+
   const underlyingLtp = indexTicks[underlying]?.ltp ?? 0;
   const atm = chain.reduce<OptionData | null>((best, row) => {
     if (!best) return row;
@@ -2227,6 +3880,30 @@ function OptionChainTab({
       : best;
   }, null);
 
+  const localAtmIdx = atm
+    ? chain.findIndex((r) => r.strike_price === atm.strike_price)
+    : -1;
+  const [showAllStrikes, setShowAllStrikes] = useState(false);
+  const [sidePanel, setSidePanel] = useState<{
+    instrumentKey: string;
+    ltp: number;
+    side: "CE" | "PE";
+    strikePrice: number;
+  } | null>(null);
+  const displayChain = showAllStrikes
+    ? chain
+    : (() => {
+        if (localAtmIdx < 0) return chain;
+        const start = Math.max(0, localAtmIdx - 10);
+        const end = Math.min(chain.length, localAtmIdx + 11);
+        return chain.slice(start, end);
+      })();
+
+  // Ref callback: scrolls ATM row into view whenever it is mounted/updated
+  const atmRowRef = useCallback((node: HTMLTableRowElement | null) => {
+    if (node) node.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, []);
+
   return (
     <div className="flex flex-col h-full">
       {/* Trend Analysis Panel */}
@@ -2235,6 +3912,7 @@ function OptionChainTab({
         underlyingLtp={underlyingLtp}
         expiries={expiryDates}
         selectedExpiry={expiry}
+        tradeSettings={tradeSettings}
       />
       {/* Controls */}
       <div
@@ -2314,60 +3992,18 @@ function OptionChainTab({
       ) : (
         <div className="overflow-auto flex-1" data-ocid="options.table">
           <table className="w-full text-xs border-collapse min-w-[560px]">
-            <thead className="sticky top-0 z-10">
-              <tr style={{ background: "oklch(var(--card))" }}>
-                <th
-                  colSpan={4}
-                  className="py-1.5 px-2 text-center text-[10px] font-bold tracking-wider border-b border-r border-border"
-                  style={{
-                    color: "oklch(0.64 0.2 145)",
-                    background: "oklch(0.64 0.2 145 / 0.08)",
-                  }}
-                >
-                  CE
-                </th>
-                <th className="py-1.5 px-3 text-center text-[10px] text-muted-foreground font-bold border-b border-border">
-                  STRIKE
-                </th>
-                <th
-                  colSpan={4}
-                  className="py-1.5 px-2 text-center text-[10px] font-bold tracking-wider border-b border-l border-border"
-                  style={{
-                    color: "oklch(0.62 0.22 22)",
-                    background: "oklch(0.62 0.22 22 / 0.08)",
-                  }}
-                >
-                  PE
-                </th>
-              </tr>
-              <tr style={{ background: "oklch(var(--card))" }}>
-                {["LTP", "OI", "VOL", "IV%"].map((h) => (
-                  <th
-                    key={h}
-                    className="py-1 px-2 text-right text-[10px] text-muted-foreground font-semibold border-b border-border"
-                  >
-                    {h}
-                  </th>
-                ))}
-                <th className="py-1 px-2 border-b border-border" />
-                {["LTP", "OI", "VOL", "IV%"].map((h) => (
-                  <th
-                    key={h}
-                    className="py-1 px-2 text-left text-[10px] text-muted-foreground font-semibold border-b border-border"
-                  >
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
+            <OptionChainHeader />
             <tbody>
-              {chain.map((row) => {
+              {displayChain.map((row) => {
                 const isAtm = atm?.strike_price === row.strike_price;
                 const ce = row.call_options?.market_data ?? {};
                 const pe = row.put_options?.market_data ?? {};
+                const ceIk = row.call_options?.instrument_key;
+                const peIk = row.put_options?.instrument_key;
                 return (
                   <tr
                     key={row.strike_price}
+                    ref={isAtm ? atmRowRef : undefined}
                     className={`border-b border-border/50 transition-colors ${
                       isAtm ? "" : "hover:bg-secondary/40"
                     }`}
@@ -2380,8 +4016,21 @@ function OptionChainTab({
                         : {}
                     }
                   >
-                    <td className="py-1.5 px-2 text-right font-mono-data text-white">
-                      {ce.ltp?.toFixed(2) ?? "—"}
+                    {/* biome-ignore lint/a11y/useKeyWithClickEvents: trading table cell */}
+                    <td
+                      className="py-1.5 px-2 text-right font-mono-data text-foreground cursor-pointer hover:text-primary transition-colors"
+                      onClick={() =>
+                        ceIk &&
+                        (ce.ltp ?? 0) > 0 &&
+                        setSidePanel({
+                          instrumentKey: ceIk,
+                          ltp: ce.ltp ?? 0,
+                          side: "CE",
+                          strikePrice: row.strike_price,
+                        })
+                      }
+                    >
+                      {(ce.ltp ?? 0) > 0 ? (ce.ltp ?? 0).toFixed(2) : "—"}
                     </td>
                     <td
                       className="py-1.5 px-2 text-right font-mono-data"
@@ -2411,8 +4060,21 @@ function OptionChainTab({
                       )}
                       {row.strike_price.toLocaleString("en-IN")}
                     </td>
-                    <td className="py-1.5 px-2 text-left font-mono-data text-white border-l border-border">
-                      {pe.ltp?.toFixed(2) ?? "—"}
+                    {/* biome-ignore lint/a11y/useKeyWithClickEvents: trading table cell */}
+                    <td
+                      className="py-1.5 px-2 text-left font-mono-data text-foreground border-l border-border cursor-pointer hover:text-primary transition-colors"
+                      onClick={() =>
+                        peIk &&
+                        (pe.ltp ?? 0) > 0 &&
+                        setSidePanel({
+                          instrumentKey: peIk,
+                          ltp: pe.ltp ?? 0,
+                          side: "PE",
+                          strikePrice: row.strike_price,
+                        })
+                      }
+                    >
+                      {(pe.ltp ?? 0) > 0 ? (pe.ltp ?? 0).toFixed(2) : "—"}
                     </td>
                     <td
                       className="py-1.5 px-2 text-left font-mono-data"
@@ -2437,7 +4099,37 @@ function OptionChainTab({
               })}
             </tbody>
           </table>
+          <div className="flex justify-center py-2 border-t border-border/50">
+            <button
+              data-ocid="option_chain.show_all_toggle"
+              type="button"
+              onClick={() => setShowAllStrikes((v) => !v)}
+              className="text-xs text-muted-foreground underline hover:text-foreground transition-colors"
+            >
+              {showAllStrikes
+                ? "Show ±10 strikes"
+                : `Show all ${chain.length} strikes`}
+            </button>
+          </div>
         </div>
+      )}
+      {sidePanel && (
+        <LtpSidePanel
+          instrumentKey={sidePanel.instrumentKey}
+          ltp={sidePanel.ltp}
+          side={sidePanel.side}
+          strikePrice={sidePanel.strikePrice}
+          token={token}
+          onClose={() => setSidePanel(null)}
+          onBuy={(ik, ltpVal) => {
+            onBuyStrike?.(ik, ltpVal, "BUY");
+            setSidePanel(null);
+          }}
+          onSell={(ik, ltpVal) => {
+            onBuyStrike?.(ik, ltpVal, "SELL");
+            setSidePanel(null);
+          }}
+        />
       )}
     </div>
   );
@@ -2720,7 +4412,15 @@ function OverviewTab({
   profile,
   token,
   loading,
-}: { profile: Profile | null; token: string; loading: boolean }) {
+  indexTicks,
+  onTabChange,
+}: {
+  profile: Profile | null;
+  token: string;
+  loading: boolean;
+  indexTicks?: Record<string, TickData>;
+  onTabChange?: (tab: TabValue) => void;
+}) {
   const [copied, setCopied] = useState(false);
 
   const copyToken = () => {
@@ -2730,8 +4430,147 @@ function OverviewTab({
     });
   };
 
+  const isMarketOpen = () => {
+    const now = new Date();
+    const day = now.getDay(); // 0=Sun, 6=Sat
+    if (day === 0 || day === 6) return false;
+    // Convert to IST (UTC+5:30)
+    const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+    const ist = new Date(utc + 5.5 * 3600000);
+    const h = ist.getHours();
+    const m = ist.getMinutes();
+    const mins = h * 60 + m;
+    return mins >= 9 * 60 + 15 && mins < 15 * 60 + 30;
+  };
+
+  const marketOpen = isMarketOpen();
+
+  const INDEX_MAP: Array<{ label: string; key: string }> = [
+    { label: "NIFTY", key: "NSE_INDEX|Nifty 50" },
+    { label: "BANKNIFTY", key: "NSE_INDEX|Nifty Bank" },
+    { label: "SENSEX", key: "BSE_INDEX|SENSEX" },
+  ];
+
   return (
     <div className="p-4 space-y-4">
+      {/* Market Status Banner */}
+      <div
+        className={`flex items-center justify-between px-4 py-2.5 rounded border ${
+          marketOpen
+            ? "border-green-800/40 bg-green-950/30"
+            : "border-border bg-secondary/30"
+        }`}
+      >
+        <div className="flex items-center gap-2">
+          <span
+            className={`w-2 h-2 rounded-full inline-block ${marketOpen ? "bg-green-400 animate-pulse" : "bg-muted-foreground"}`}
+          />
+          <span className="text-xs font-semibold text-foreground">
+            Market {marketOpen ? "Open" : "Closed"}
+          </span>
+        </div>
+        <span className="text-[10px] text-muted-foreground">
+          {marketOpen ? "Closes 3:30 PM IST" : "Opens 9:15 AM IST"}
+        </span>
+      </div>
+
+      {/* Portfolio Summary */}
+      <div className="rounded border border-border overflow-hidden">
+        <div
+          className="px-4 py-2.5 border-b border-border"
+          style={{ background: "oklch(var(--card))" }}
+        >
+          <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+            Portfolio Summary
+          </p>
+        </div>
+        <div className="grid grid-cols-3 divide-x divide-border">
+          {[
+            { label: "Total Value", value: "—", color: "text-foreground" },
+            { label: "Day P&L", value: "—", color: "text-muted-foreground" },
+            {
+              label: "Overall P&L",
+              value: "—",
+              color: "text-muted-foreground",
+            },
+          ].map((item) => (
+            <div key={item.label} className="px-3 py-3 text-center">
+              <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-1">
+                {item.label}
+              </div>
+              <div className={`font-mono-data text-sm font-bold ${item.color}`}>
+                {item.value}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Index Overview */}
+      {indexTicks && (
+        <div className="rounded border border-border overflow-hidden">
+          <div
+            className="px-4 py-2.5 border-b border-border"
+            style={{ background: "oklch(var(--card))" }}
+          >
+            <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+              Index Overview
+            </p>
+          </div>
+          <div className="grid grid-cols-3 divide-x divide-border">
+            {INDEX_MAP.map(({ label, key }) => {
+              const tick = indexTicks[key];
+              const pos = (tick?.change ?? 0) >= 0;
+              return (
+                <div key={label} className="px-2 py-3 text-center">
+                  <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-1 font-bold">
+                    {label}
+                  </div>
+                  <div className="font-mono-data text-sm font-bold text-foreground">
+                    {tick
+                      ? tick.ltp.toLocaleString("en-IN", {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })
+                      : "—"}
+                  </div>
+                  {tick && (
+                    <div
+                      className={`text-[10px] font-bold mt-0.5 ${pos ? "text-gain" : "text-loss"}`}
+                    >
+                      {pos ? "+" : ""}
+                      {tick.change.toFixed(2)}%
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Quick Actions */}
+      {onTabChange && (
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            data-ocid="overview.orders_button"
+            onClick={() => onTabChange("orders")}
+            className="py-2.5 px-4 rounded border border-border text-xs font-semibold text-foreground hover:bg-secondary transition-colors"
+          >
+            View Orders
+          </button>
+          <button
+            type="button"
+            data-ocid="overview.options_button"
+            onClick={() => onTabChange("options")}
+            className="py-2.5 px-4 rounded border border-primary/50 text-xs font-semibold text-primary hover:bg-primary/10 transition-colors"
+          >
+            View Options
+          </button>
+        </div>
+      )}
+
       {/* Profile */}
       <div className="rounded border border-border overflow-hidden">
         <div
@@ -2944,6 +4783,30 @@ function DashboardScreen({
   } | null>(null);
   const [optionUnderlying, setOptionUnderlying] =
     useState<string>("NSE_INDEX|Nifty 50");
+  const [orderPrefill, setOrderPrefill] = useState<{
+    instrumentKey?: string;
+    txType?: "BUY" | "SELL";
+    price?: string;
+    quantity?: string;
+  } | null>(null);
+
+  const handleBuyStrike = (
+    instrumentKey: string,
+    ltp: number,
+    txType: "BUY" | "SELL",
+  ) => {
+    setOrderPrefill({
+      instrumentKey,
+      txType,
+      price: ltp.toFixed(2),
+      quantity: "1",
+    });
+    setActiveTab("orders");
+  };
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [tradeSettings, setTradeSettings] =
+    useState<TradeSettings>(loadTradeSettings);
 
   const handleIndexContextMenu = (
     key: string,
@@ -3005,6 +4868,13 @@ function DashboardScreen({
         theme={theme}
         onThemeToggle={toggleTheme}
         lastUpdated={lastUpdated}
+        onSettingsOpen={() => setSettingsOpen(true)}
+      />
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        tradeSettings={tradeSettings}
+        onTradeSettingsSave={setTradeSettings}
       />
 
       {/* CORS warning */}
@@ -3050,17 +4920,33 @@ function DashboardScreen({
         )}
 
         {/* Main content */}
-        <div className="flex-1 flex flex-col overflow-hidden">
+        <div className="flex-1 flex flex-col overflow-hidden relative z-40">
           <TabNav active={activeTab} onChange={setActiveTab} />
 
           <div className="flex-1 overflow-auto animate-slide-up">
             {activeTab === "overview" && (
-              <OverviewTab profile={profile} token={token} loading={loading} />
+              <OverviewTab
+                profile={profile}
+                token={token}
+                loading={loading}
+                indexTicks={indexTicks}
+                onTabChange={setActiveTab}
+              />
             )}
             {activeTab === "funds" && (
               <FundsTab funds={funds} loading={loading} />
             )}
-            {activeTab === "orders" && <OrdersTab token={token} />}
+            {activeTab === "orders" && (
+              <OrdersTab
+                token={token}
+                prefill={orderPrefill}
+                onPrefillConsumed={() => setOrderPrefill(null)}
+                onBack={() => {
+                  setOrderPrefill(null);
+                  setActiveTab("options");
+                }}
+              />
+            )}
             {activeTab === "positions" && <PositionsTab token={token} />}
             {activeTab === "holdings" && <HoldingsTab token={token} />}
             {activeTab === "options" && (
@@ -3068,6 +4954,8 @@ function DashboardScreen({
                 token={token}
                 indexTicks={indexTicks}
                 initialUnderlying={optionUnderlying}
+                tradeSettings={tradeSettings}
+                onBuyStrike={handleBuyStrike}
               />
             )}
             {activeTab === "market" && <LiveTab token={token} />}
