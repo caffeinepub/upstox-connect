@@ -34,6 +34,7 @@ import {
   LogOut,
   Menu,
   Moon,
+  Pencil,
   Plus,
   RefreshCw,
   Settings,
@@ -48,6 +49,92 @@ import {
 } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+
+// ─── Black-Scholes Functions ──────────────────────────────────────────────────
+function normCDF(x: number): number {
+  const a1 = 0.254829592;
+  const a2 = -0.284496736;
+  const a3 = 1.421413741;
+  const a4 = -1.453152027;
+  const a5 = 1.061405429;
+  const p = 0.3275911;
+  const sign = x < 0 ? -1 : 1;
+  const t = 1.0 / (1.0 + p * Math.abs(x));
+  const y =
+    1.0 -
+    ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp((-x * x) / 2);
+  return 0.5 * (1.0 + sign * y);
+}
+
+function normPDF(x: number): number {
+  return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+}
+
+function blackScholes(
+  S: number,
+  K: number,
+  T: number,
+  r: number,
+  sigma: number,
+  type: "CE" | "PE",
+) {
+  if (T <= 0 || sigma <= 0 || S <= 0 || K <= 0) {
+    return {
+      price: 0,
+      delta: type === "CE" ? 0.5 : -0.5,
+      gamma: 0,
+      theta: 0,
+      vega: 0,
+    };
+  }
+  const d1 =
+    (Math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T));
+  const d2 = d1 - sigma * Math.sqrt(T);
+  const sqrtT = Math.sqrt(T);
+  const nd1 = normCDF(d1);
+  const nd2 = normCDF(d2);
+  const nnd1 = normCDF(-d1);
+  const nnd2 = normCDF(-d2);
+  const price =
+    type === "CE"
+      ? S * nd1 - K * Math.exp(-r * T) * nd2
+      : K * Math.exp(-r * T) * nnd2 - S * nnd1;
+  const delta = type === "CE" ? nd1 : nd1 - 1;
+  const gamma = normPDF(d1) / (S * sigma * sqrtT);
+  const theta =
+    type === "CE"
+      ? (-(S * normPDF(d1) * sigma) / (2 * sqrtT) -
+          r * K * Math.exp(-r * T) * nd2) /
+        365
+      : (-(S * normPDF(d1) * sigma) / (2 * sqrtT) +
+          r * K * Math.exp(-r * T) * nnd2) /
+        365;
+  const vega = (S * normPDF(d1) * sqrtT) / 100;
+  return { price, delta, gamma, theta, vega };
+}
+
+function impliedVolatility(
+  marketPrice: number,
+  S: number,
+  K: number,
+  T: number,
+  r: number,
+  type: "CE" | "PE",
+): number {
+  if (marketPrice <= 0 || T <= 0) return 0.2;
+  let sigma = 0.25;
+  for (let i = 0; i < 100; i++) {
+    const { price, vega } = blackScholes(S, K, T, r, sigma, type);
+    const diff = price - marketPrice;
+    if (Math.abs(diff) < 0.001) break;
+    const vegaActual = vega * 100;
+    if (Math.abs(vegaActual) < 1e-8) break;
+    sigma = sigma - diff / vegaActual;
+    if (sigma < 0.001) sigma = 0.001;
+    if (sigma > 5) sigma = 5;
+  }
+  return sigma;
+}
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 function useTheme() {
@@ -1198,6 +1285,7 @@ function TabNav({
 }
 
 // ─── Orders Tab ───────────────────────────────────────────────────────────────
+// ─── Orders Tab ───────────────────────────────────────────────────────────────
 function OrdersTab({
   token,
   prefill,
@@ -1210,20 +1298,26 @@ function OrdersTab({
     txType?: "BUY" | "SELL";
     price?: string;
     quantity?: string;
+    lotSize?: number;
   } | null;
   onPrefillConsumed?: () => void;
   onBack?: () => void;
 }) {
+  // ── Sub-tab state ──
+  const [orderSubTab, setOrderSubTab] = useState<"regular" | "gtt">("regular");
+
+  // ── Regular Order state ──
   const [instrumentKey, setInstrumentKey] = useState("NSE_EQ|INE848E01016");
   const [txType, setTxType] = useState<"BUY" | "SELL">("BUY");
   const [orderType, setOrderType] = useState("MARKET");
-  const [product, setProduct] = useState("NRML");
+  const [product, setProduct] = useState("D");
   const [qtyMode, setQtyMode] = useState<"QTY" | "LOTS">("LOTS");
   const [quantity, setQuantity] = useState("1");
   const [price, setPrice] = useState("");
   const [triggerPrice, setTriggerPrice] = useState("");
   const [validity, setValidity] = useState("DAY");
   const [placing, setPlacing] = useState(false);
+  const [editingOrderId, setEditingOrderId] = useState<string | null>(null);
   const [orderFormDepth, setOrderFormDepth] = useState<{
     bids: Array<{ price: number; quantity: number }>;
     asks: Array<{ price: number; quantity: number }>;
@@ -1239,6 +1333,26 @@ function OrdersTab({
     "ALL" | "PENDING" | "SUCCESS" | "CANCELLED"
   >("ALL");
 
+  // ── GTT state ──
+  const [gttOrders, setGttOrders] = useState<any[]>([]);
+  const [gttLoading, setGttLoading] = useState(false);
+  const [gttType, setGttType] = useState<"SINGLE" | "MULTIPLE">("SINGLE");
+  const [gttInstrumentToken, setGttInstrumentToken] = useState("");
+  const [gttTxType, setGttTxType] = useState<"BUY" | "SELL">("BUY");
+  const [gttProduct, setGttProduct] = useState("D");
+  const [gttQty, setGttQty] = useState("1");
+  const [gttEntryPrice, setGttEntryPrice] = useState("");
+  const [gttEntryTriggerType, setGttEntryTriggerType] = useState<
+    "ABOVE" | "BELOW"
+  >("ABOVE");
+  const [gttTargetPrice, setGttTargetPrice] = useState("");
+  const [gttSlPrice, setGttSlPrice] = useState("");
+  const [gttTrailingGap, setGttTrailingGap] = useState("");
+  const [gttEditId, setGttEditId] = useState<string | null>(null);
+  const [gttPlacing, setGttPlacing] = useState(false);
+  const [prefillLotSize, setPrefillLotSize] = useState<number | null>(null);
+
+  // ── Regular order fetching ──
   const fetchOrders = useCallback(async () => {
     setLoadingOrders(true);
     const res = await upstoxFetch<Order[]>("/v2/order/retrieve-all", token);
@@ -1253,6 +1367,7 @@ function OrdersTab({
     return () => clearInterval(id);
   }, [fetchOrders]);
 
+  // ── Market depth for order form ──
   useEffect(() => {
     if (!token || !instrumentKey) return;
     let cancelled = false;
@@ -1292,7 +1407,6 @@ function OrdersTab({
             return;
           }
         }
-        // Fallback to quotes endpoint
         const res2 = await fetch(
           `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${encoded}`,
           {
@@ -1339,17 +1453,17 @@ function OrdersTab({
         setOrderType("LIMIT");
       }
       if (prefill.quantity) setQuantity(prefill.quantity);
+      if (prefill.lotSize) setPrefillLotSize(prefill.lotSize);
+      else setPrefillLotSize(null);
       onPrefillConsumed?.();
     }
   }, [prefill]);
 
-  // Reset quantity to "1" lot when instrument changes
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional reset
   useEffect(() => {
     if (qtyMode === "LOTS") setQuantity("1");
   }, [instrumentKey, qtyMode]);
 
-  // Fetch available margin on token load
   useEffect(() => {
     if (!token) return;
     upstoxFetch<any>("/v2/user/get-funds-and-margin", token).then((res) => {
@@ -1360,7 +1474,6 @@ function OrdersTab({
     });
   }, [token]);
 
-  // Fetch required margin when order params change (debounced 500ms)
   useEffect(() => {
     if (!token || !instrumentKey || !quantity) return;
     const actualQty =
@@ -1428,40 +1541,357 @@ function OrdersTab({
     qtyMode,
   ]);
 
+  // ── GTT fetching ──
+  const fetchGTTOrders = useCallback(async () => {
+    try {
+      setGttLoading(true);
+      const res = await fetch("https://api.upstox.com/v3/order/gtt", {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+        },
+      });
+      const json = await res.json();
+      setGttOrders(json?.data || []);
+    } catch {
+      // silently ignore
+    } finally {
+      setGttLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    if (orderSubTab !== "gtt") return;
+    fetchGTTOrders();
+    const id = setInterval(fetchGTTOrders, 5000);
+    return () => clearInterval(id);
+  }, [orderSubTab, fetchGTTOrders]);
+
+  // ── Place / modify regular order (v2 API) ──
   const placeOrder = async () => {
     if (!instrumentKey.trim() || !quantity) {
       toast.error("Instrument key and quantity are required");
       return;
     }
     setPlacing(true);
-    const actualQty =
+    const lotSize = prefillLotSize ?? getLotSize(instrumentKey);
+    const rawQty =
       qtyMode === "LOTS"
-        ? Number.parseInt(quantity || "1") * getLotSize(instrumentKey)
+        ? Number.parseInt(quantity || "1") * lotSize
         : Number.parseInt(quantity, 10);
-    const body: any = {
-      instrument_token: instrumentKey.trim(),
-      transaction_type: txType,
-      order_type: orderType,
-      product,
-      quantity: actualQty,
-      validity,
-      tag: "upstox-connect",
-    };
-    if (orderType !== "MARKET") body.price = Number.parseFloat(price) || 0;
-    if (orderType === "SL" || orderType === "SL-M")
-      body.trigger_price = Number.parseFloat(triggerPrice) || 0;
+    // Ensure quantity is a multiple of lot size
+    const actualQty = Math.round(rawQty / lotSize) * lotSize;
+    if (actualQty <= 0) {
+      toast.error(`Quantity must be at least 1 lot (${lotSize} units)`);
+      setPlacing(false);
+      return;
+    }
+    if (rawQty !== actualQty) {
+      toast.info(
+        `Quantity rounded to ${actualQty} (multiple of lot size ${lotSize})`,
+      );
+    }
+    const parsedPrice = Number.parseFloat(price) || 0;
+    const parsedTrigger = Number.parseFloat(triggerPrice) || 0;
 
-    const res = await upstoxFetch<any>("/v2/order/place", token, {
-      method: "POST",
-      body,
-    });
-    if (res.data) {
-      toast.success(`Order placed! ID: ${res.data.order_id ?? "—"}`);
-      fetchOrders();
-    } else {
-      toast.error(`Order failed: ${res.error}`);
+    if ((orderType === "SL" || orderType === "SL-M") && parsedTrigger <= 0) {
+      toast.error("Trigger price is required for SL/SL-M orders");
+      setPlacing(false);
+      return;
+    }
+
+    try {
+      if (editingOrderId) {
+        const modifyBody: any = {
+          order_id: editingOrderId,
+          quantity: actualQty,
+          validity,
+          price: orderType === "MARKET" ? 0 : parsedPrice,
+          order_type: orderType,
+          disclosed_quantity: 0,
+          trigger_price:
+            orderType === "SL" || orderType === "SL-M" ? parsedTrigger : 0,
+        };
+        const res = await fetch("https://api.upstox.com/v2/order/modify", {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify(modifyBody),
+        });
+        const json = await res.json();
+        if (res.ok) {
+          toast.success(`Order modified: ${editingOrderId}`);
+          setEditingOrderId(null);
+          fetchOrders();
+        } else {
+          toast.error(
+            `Modify failed: ${
+              json?.errors?.[0]?.message ||
+              json?.message ||
+              `HTTP ${res.status}`
+            }`,
+          );
+        }
+      } else {
+        // Debug info: show exactly what is being sent
+        toast.info(
+          `Placing: ${instrumentKey} | qty: ${actualQty} | lotSize: ${lotSize}`,
+          { duration: 2000 },
+        );
+        const body: any = {
+          instrument_key: instrumentKey.trim(),
+          transaction_type: txType,
+          order_type: orderType,
+          product,
+          quantity: actualQty,
+          price: orderType === "MARKET" ? 0 : parsedPrice,
+          trigger_price:
+            orderType === "SL" || orderType === "SL-M" ? parsedTrigger : 0,
+          disclosed_quantity: 0,
+          validity,
+          is_amo: false,
+          tag: "upstox-connect",
+        };
+        const res = await fetch("https://api.upstox.com/v2/order/place", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify(body),
+        });
+        const json = await res.json();
+        if (res.ok) {
+          toast.success(`Order placed! ID: ${json?.data?.order_id ?? "—"}`);
+          fetchOrders();
+        } else {
+          const errMsg =
+            json?.errors?.[0]?.message ||
+            json?.errors?.[0]?.reason ||
+            json?.message ||
+            json?.error ||
+            `HTTP ${res.status}: ${JSON.stringify(json).slice(0, 200)}`;
+          toast.error(`Order failed: ${errMsg}`);
+        }
+      }
+    } catch (e: any) {
+      toast.error(`Order error: ${e.message ?? "Network error"}`);
     }
     setPlacing(false);
+  };
+
+  const cancelRegularOrder = async (orderId: string) => {
+    try {
+      const res = await fetch(
+        `https://api.upstox.com/v2/order/cancel?order_id=${orderId}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+        },
+      );
+      const json = await res.json();
+      if (res.ok) {
+        toast.success(`Order cancelled: ${orderId}`);
+        fetchOrders();
+      } else {
+        toast.error(
+          `Cancel failed: ${
+            json?.errors?.[0]?.message || json?.message || `HTTP ${res.status}`
+          }`,
+        );
+      }
+    } catch (e: any) {
+      toast.error(`Cancel error: ${e.message}`);
+    }
+  };
+
+  const startEditOrder = (order: Order) => {
+    setEditingOrderId(order.order_id);
+    if (order.instrument_token) setInstrumentKey(order.instrument_token);
+    setTxType(order.transaction_type as "BUY" | "SELL");
+    setOrderType(order.order_type || "MARKET");
+    setProduct(order.product || "D");
+    setQtyMode("QTY");
+    setQuantity(String(order.quantity || 1));
+    setPrice(String(order.price || ""));
+    setTriggerPrice(String(order.trigger_price || ""));
+    setOrderSubTab("regular");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  // ── GTT operations ──
+  const resetGttForm = () => {
+    setGttInstrumentToken("");
+    setGttEntryPrice("");
+    setGttTargetPrice("");
+    setGttSlPrice("");
+    setGttTrailingGap("");
+    setGttQty("1");
+    setGttEditId(null);
+  };
+
+  const submitGTTOrder = async () => {
+    if (!gttInstrumentToken.trim() || !gttEntryPrice) {
+      toast.error("Instrument token and entry price are required");
+      return;
+    }
+    setGttPlacing(true);
+    const rules: any[] = [];
+    rules.push({
+      strategy: "ENTRY",
+      trigger_type: gttEntryTriggerType,
+      trigger_price: Number.parseFloat(gttEntryPrice),
+    });
+    if (gttType === "MULTIPLE") {
+      if (!gttTargetPrice || !gttSlPrice) {
+        toast.error("Target and SL price required for MULTIPLE type");
+        setGttPlacing(false);
+        return;
+      }
+      rules.push({
+        strategy: "TARGET",
+        trigger_type: "IMMEDIATE",
+        trigger_price: Number.parseFloat(gttTargetPrice),
+      });
+      const slRule: any = {
+        strategy: "STOPLOSS",
+        trigger_type: "IMMEDIATE",
+        trigger_price: Number.parseFloat(gttSlPrice),
+      };
+      if (gttTrailingGap)
+        slRule.trailing_gap = Number.parseFloat(gttTrailingGap);
+      rules.push(slRule);
+    }
+    try {
+      if (gttEditId) {
+        const res = await fetch("https://api.upstox.com/v3/order/gtt/modify", {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            type: gttType,
+            quantity: Number.parseInt(gttQty),
+            rules,
+            gtt_order_id: gttEditId,
+          }),
+        });
+        const json = await res.json();
+        if (res.ok) {
+          toast.success(`GTT updated: ${gttEditId}`);
+          resetGttForm();
+        } else {
+          toast.error(
+            `GTT modify failed: ${
+              json?.errors?.[0]?.message ||
+              json?.errors?.[0]?.reason ||
+              json?.message ||
+              json?.error ||
+              `HTTP ${res.status}: ${JSON.stringify(json).slice(0, 200)}`
+            }`,
+          );
+        }
+      } else {
+        const res = await fetch("https://api.upstox.com/v3/order/gtt/place", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            type: gttType,
+            quantity: Number.parseInt(gttQty),
+            product: gttProduct,
+            rules,
+            instrument_token: gttInstrumentToken,
+            transaction_type: gttTxType,
+          }),
+        });
+        const json = await res.json();
+        if (res.ok) {
+          toast.success(`GTT placed! ID: ${json?.data?.gtt_order_id ?? "—"}`);
+          resetGttForm();
+        } else {
+          toast.error(
+            `GTT failed: ${
+              json?.errors?.[0]?.message ||
+              json?.errors?.[0]?.reason ||
+              json?.message ||
+              json?.error ||
+              `HTTP ${res.status}: ${JSON.stringify(json).slice(0, 200)}`
+            }`,
+          );
+        }
+      }
+      fetchGTTOrders();
+    } catch (e: any) {
+      toast.error(`GTT error: ${e.message ?? "Network error"}`);
+    }
+    setGttPlacing(false);
+  };
+
+  const cancelGTTOrder = async (gttOrderId: string) => {
+    try {
+      const res = await fetch("https://api.upstox.com/v3/order/gtt/cancel", {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({ gtt_order_id: gttOrderId }),
+      });
+      const json = await res.json();
+      if (res.ok) {
+        toast.success(`GTT cancelled: ${gttOrderId}`);
+        fetchGTTOrders();
+      } else {
+        toast.error(
+          `GTT cancel failed: ${
+            json?.errors?.[0]?.message || json?.message || `HTTP ${res.status}`
+          }`,
+        );
+      }
+    } catch (e: any) {
+      toast.error(`GTT cancel error: ${e.message}`);
+    }
+  };
+
+  const startEditGTT = (gtt: any) => {
+    setGttEditId(gtt.gtt_order_id || gtt.id);
+    setGttType(gtt.type || "SINGLE");
+    setGttInstrumentToken(gtt.instrument_token || "");
+    setGttTxType(gtt.transaction_type || "BUY");
+    setGttProduct(gtt.product || "D");
+    setGttQty(String(gtt.quantity || 1));
+    const entryRule = (gtt.rules || []).find(
+      (r: any) => r.strategy === "ENTRY",
+    );
+    if (entryRule) {
+      setGttEntryPrice(String(entryRule.trigger_price || ""));
+      setGttEntryTriggerType(entryRule.trigger_type || "ABOVE");
+    }
+    const tgtRule = (gtt.rules || []).find((r: any) => r.strategy === "TARGET");
+    if (tgtRule) setGttTargetPrice(String(tgtRule.trigger_price || ""));
+    const slRule = (gtt.rules || []).find(
+      (r: any) => r.strategy === "STOPLOSS",
+    );
+    if (slRule) {
+      setGttSlPrice(String(slRule.trigger_price || ""));
+      setGttTrailingGap(String(slRule.trailing_gap || ""));
+    }
+    window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   const statusBadge = (s: string) => {
@@ -1472,9 +1902,19 @@ function OrdersTab({
     return "bg-secondary text-muted-foreground border-border";
   };
 
+  const isPendingOrder = (o: Order) =>
+    [
+      "open",
+      "pending",
+      "trigger pending",
+      "after market order req received",
+      "modify pending",
+      "cancel pending",
+    ].some((s) => o.status.toLowerCase().includes(s));
+
   return (
     <div className="space-y-0">
-      {/* Back to Options link when pre-filled from option chain */}
+      {/* Back to Options */}
       {prefill && onBack && (
         <div className="px-4 pt-3 pb-1">
           <button
@@ -1487,498 +1927,1043 @@ function OrdersTab({
           </button>
         </div>
       )}
-      {/* Order Form */}
-      <div className="p-4 border-b border-border">
-        <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase mb-3">
-          Place Order
-        </p>
 
-        {/* BUY / SELL toggle */}
-        <div className="flex gap-0 mb-3 rounded overflow-hidden border border-border">
-          <button
-            data-ocid="orders.buy_toggle"
-            type="button"
-            onClick={() => setTxType("BUY")}
-            className={`flex-1 py-2 text-xs font-bold transition-colors ${
-              txType === "BUY"
-                ? "bg-blue-600 text-white"
-                : "bg-secondary text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            BUY
-          </button>
-          <button
-            data-ocid="orders.sell_toggle"
-            type="button"
-            onClick={() => setTxType("SELL")}
-            className={`flex-1 py-2 text-xs font-bold transition-colors ${
-              txType === "SELL"
-                ? "bg-red-600 text-white"
-                : "bg-secondary text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            SELL
-          </button>
-        </div>
+      {/* Sub-tab pills */}
+      <div className="flex gap-2 px-4 pt-3 pb-2 border-b border-border">
+        <button
+          data-ocid="orders.regular_tab"
+          type="button"
+          onClick={() => setOrderSubTab("regular")}
+          className={`px-3 py-1.5 rounded text-[11px] font-bold transition-colors ${
+            orderSubTab === "regular"
+              ? "bg-primary text-primary-foreground"
+              : "bg-muted text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          Regular Orders
+        </button>
+        <button
+          data-ocid="orders.gtt_tab"
+          type="button"
+          onClick={() => setOrderSubTab("gtt")}
+          className={`px-3 py-1.5 rounded text-[11px] font-bold transition-colors ${
+            orderSubTab === "gtt"
+              ? "bg-primary text-primary-foreground"
+              : "bg-muted text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          GTT Orders
+        </button>
+      </div>
 
-        <div className="grid grid-cols-1 gap-2">
-          <div>
-            <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-              Instrument Key
-            </Label>
-            <Input
-              data-ocid="orders.instrument_input"
-              placeholder="NSE_EQ|INE848E01016"
-              value={instrumentKey}
-              onChange={(e) => setInstrumentKey(e.target.value)}
-              className="h-8 mt-1 bg-secondary border-border font-mono text-xs"
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <div className="flex items-center gap-2 mb-1">
-                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                  Qty
-                </Label>
-                <div className="flex rounded overflow-hidden border border-border text-[9px]">
-                  <button
-                    data-ocid="orders.qty_mode_lots"
-                    type="button"
-                    onClick={() => {
-                      setQtyMode("LOTS");
-                      setQuantity("1");
-                    }}
-                    className={`px-2 py-0.5 font-bold transition-colors ${qtyMode === "LOTS" ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground"}`}
-                  >
-                    LOTS
-                  </button>
-                  <button
-                    data-ocid="orders.qty_mode_qty"
-                    type="button"
-                    onClick={() => {
-                      setQtyMode("QTY");
-                      setQuantity(String(getLotSize(instrumentKey)));
-                    }}
-                    className={`px-2 py-0.5 font-bold transition-colors ${qtyMode === "QTY" ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground"}`}
-                  >
-                    QTY
-                  </button>
-                </div>
-              </div>
-              <div className="flex items-center gap-1">
+      {orderSubTab === "regular" && (
+        <>
+          {/* Order Form */}
+          <div className="p-4 border-b border-border">
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+                {editingOrderId
+                  ? `Modify Order · ${editingOrderId.slice(0, 16)}...`
+                  : "Place Order"}
+              </p>
+              {editingOrderId && (
                 <button
-                  data-ocid="orders.qty_decrease_button"
                   type="button"
                   onClick={() => {
-                    const step =
-                      qtyMode === "LOTS" ? 1 : getLotSize(instrumentKey);
-                    setQuantity(
-                      String(
-                        Math.max(
-                          qtyMode === "LOTS" ? 1 : 0,
-                          Number.parseInt(quantity || "1") - step,
-                        ),
-                      ),
-                    );
+                    setEditingOrderId(null);
+                    setPrice("");
+                    setTriggerPrice("");
                   }}
-                  className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
+                  className="text-[10px] text-muted-foreground hover:text-foreground underline"
                 >
-                  −
+                  Cancel Edit
                 </button>
-                <input
-                  data-ocid="orders.qty_input"
-                  type="number"
-                  value={quantity}
-                  onChange={(e) => setQuantity(e.target.value)}
-                  className="h-8 flex-1 bg-secondary border border-border text-foreground text-xs rounded px-2 text-center font-mono min-w-0"
-                  placeholder={qtyMode === "LOTS" ? "1" : "0"}
-                />
-                <button
-                  data-ocid="orders.qty_increase_button"
-                  type="button"
-                  onClick={() => {
-                    const step =
-                      qtyMode === "LOTS" ? 1 : getLotSize(instrumentKey);
-                    setQuantity(
-                      String(Number.parseInt(quantity || "0") + step),
-                    );
-                  }}
-                  className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
-                >
-                  +
-                </button>
-              </div>
-              {qtyMode === "LOTS" && (
-                <p className="text-[9px] text-muted-foreground mt-0.5">
-                  1 lot = {getLotSize(instrumentKey)} · actual:{" "}
-                  {Number.parseInt(quantity || "1") * getLotSize(instrumentKey)}
-                </p>
               )}
             </div>
-            <div>
-              <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                Price
-              </Label>
-              <Input
-                data-ocid="orders.price_input"
-                type="number"
-                placeholder="0.00"
-                value={price}
-                onChange={(e) => setPrice(e.target.value)}
-                disabled={orderType === "MARKET"}
-                className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs disabled:opacity-40"
-              />
-            </div>
-          </div>
 
-          <div className="grid grid-cols-3 gap-2">
-            <div>
-              <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                Type
-              </Label>
-              <select
-                data-ocid="orders.type_select"
-                value={orderType}
-                onChange={(e) => setOrderType(e.target.value)}
-                className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2 font-mono"
+            {/* BUY / SELL toggle */}
+            <div className="flex gap-0 mb-3 rounded overflow-hidden border border-border">
+              <button
+                data-ocid="orders.buy_toggle"
+                type="button"
+                onClick={() => setTxType("BUY")}
+                className={`flex-1 py-2 text-xs font-bold transition-colors ${
+                  txType === "BUY"
+                    ? "bg-blue-600 text-white"
+                    : "bg-secondary text-muted-foreground hover:text-foreground"
+                }`}
               >
-                <option value="MARKET">MKT</option>
-                <option value="LIMIT">LMT</option>
-                <option value="SL">SL</option>
-                <option value="SL-M">SL-M</option>
-              </select>
-            </div>
-            <div>
-              <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                Product
-              </Label>
-              <select
-                data-ocid="orders.product_select"
-                value={product}
-                onChange={(e) => setProduct(e.target.value)}
-                className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2 font-mono"
+                BUY
+              </button>
+              <button
+                data-ocid="orders.sell_toggle"
+                type="button"
+                onClick={() => setTxType("SELL")}
+                className={`flex-1 py-2 text-xs font-bold transition-colors ${
+                  txType === "SELL"
+                    ? "bg-red-600 text-white"
+                    : "bg-secondary text-muted-foreground hover:text-foreground"
+                }`}
               >
-                <option value="CNC">CNC</option>
-                <option value="MIS">MIS</option>
-                <option value="NRML">NRML</option>
-              </select>
+                SELL
+              </button>
             </div>
-            <div>
-              <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                Validity
-              </Label>
-              <select
-                value={validity}
-                onChange={(e) => setValidity(e.target.value)}
-                className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2 font-mono"
-              >
-                <option value="DAY">DAY</option>
-                <option value="IOC">IOC</option>
-              </select>
-            </div>
-          </div>
 
-          {(orderType === "SL" || orderType === "SL-M") && (
-            <div>
-              <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                Trigger Price
-              </Label>
-              <Input
-                type="number"
-                placeholder="0.00"
-                value={triggerPrice}
-                onChange={(e) => setTriggerPrice(e.target.value)}
-                className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs"
-              />
-            </div>
-          )}
-
-          <button
-            data-ocid="orders.submit_button"
-            type="button"
-            onClick={placeOrder}
-            disabled={placing}
-            className={`w-full h-9 rounded text-xs font-bold transition-colors flex items-center justify-center gap-1.5 ${
-              txType === "BUY"
-                ? "bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
-                : "bg-red-600 hover:bg-red-700 text-white disabled:opacity-50"
-            }`}
-          >
-            {placing && <Loader2 className="w-3 h-3 animate-spin" />}
-            {txType} {orderType}
-          </button>
-        </div>
-      </div>
-
-      {/* Market Depth in Order Form */}
-      <div className="mx-4 mb-3 border border-border rounded">
-        <div className="flex items-center justify-between px-2 py-1 border-b border-border bg-secondary/50">
-          <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
-            Market Depth
-          </span>
-          {orderFormDepthLoading && (
-            <span className="text-[9px] text-muted-foreground">Loading...</span>
-          )}
-        </div>
-        {!orderFormDepthLoading && !orderFormDepth && (
-          <div className="px-3 py-2 text-[10px] text-muted-foreground italic">
-            Depth unavailable (CORS/API)
-          </div>
-        )}
-        <div className="grid grid-cols-2 divide-x divide-border">
-          <div>
-            <div className="grid grid-cols-2 px-2 py-0.5 border-b border-border">
-              <span className="text-[9px] text-muted-foreground">BID QTY</span>
-              <span className="text-[9px] text-muted-foreground text-right">
-                BID
-              </span>
-            </div>
-            {(orderFormDepth?.bids || Array(5).fill(null)).map((b, i) => (
-              // biome-ignore lint/suspicious/noArrayIndexKey: depth rows are positional
-              <div key={`bid-${i}`} className="grid grid-cols-2 px-2 py-0.5">
-                <span className="text-[10px] text-green-500 font-mono">
-                  {b ? b.quantity : "—"}
-                </span>
-                <span className="text-[10px] text-green-500 font-mono text-right">
-                  {b ? b.price.toFixed(2) : "—"}
-                </span>
+            <div className="grid grid-cols-1 gap-2">
+              <div>
+                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                  Instrument Key
+                </Label>
+                <Input
+                  data-ocid="orders.instrument_input"
+                  placeholder="NSE_EQ|INE848E01016"
+                  value={instrumentKey}
+                  onChange={(e) => setInstrumentKey(e.target.value)}
+                  className="h-8 mt-1 bg-secondary border-border font-mono text-xs"
+                />
               </div>
-            ))}
-          </div>
-          <div>
-            <div className="grid grid-cols-2 px-2 py-0.5 border-b border-border">
-              <span className="text-[9px] text-muted-foreground">ASK</span>
-              <span className="text-[9px] text-muted-foreground text-right">
-                ASK QTY
-              </span>
-            </div>
-            {(orderFormDepth?.asks || Array(5).fill(null)).map((a, i) => (
-              // biome-ignore lint/suspicious/noArrayIndexKey: depth rows are positional
-              <div key={`ask-${i}`} className="grid grid-cols-2 px-2 py-0.5">
-                <span className="text-[10px] text-red-500 font-mono">
-                  {a ? a.price.toFixed(2) : "—"}
-                </span>
-                <span className="text-[10px] text-red-500 font-mono text-right">
-                  {a ? a.quantity : "—"}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-        {orderFormDepth && (
-          <div className="px-2 py-1 border-t border-border">
-            {(() => {
-              const totalBid = orderFormDepth.bids.reduce(
-                (s, b) => s + b.quantity,
-                0,
-              );
-              const totalAsk = orderFormDepth.asks.reduce(
-                (s, a) => s + a.quantity,
-                0,
-              );
-              const total = totalBid + totalAsk || 1;
-              const bidPct = Math.round((totalBid / total) * 100);
-              return (
+
+              <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <div className="flex justify-between text-[9px] mb-0.5">
-                    <span className="text-green-500">Buy {bidPct}%</span>
-                    <span className="text-red-500">Sell {100 - bidPct}%</span>
+                  <div className="flex items-center gap-2 mb-1">
+                    <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                      Qty
+                    </Label>
+                    <div className="flex rounded overflow-hidden border border-border text-[9px]">
+                      <button
+                        data-ocid="orders.qty_mode_lots"
+                        type="button"
+                        onClick={() => {
+                          setQtyMode("LOTS");
+                          setQuantity("1");
+                        }}
+                        className={`px-2 py-0.5 font-bold transition-colors ${
+                          qtyMode === "LOTS"
+                            ? "bg-primary text-primary-foreground"
+                            : "bg-secondary text-muted-foreground"
+                        }`}
+                      >
+                        LOTS
+                      </button>
+                      <button
+                        data-ocid="orders.qty_mode_qty"
+                        type="button"
+                        onClick={() => {
+                          setQtyMode("QTY");
+                          setQuantity(
+                            String(prefillLotSize ?? getLotSize(instrumentKey)),
+                          );
+                        }}
+                        className={`px-2 py-0.5 font-bold transition-colors ${
+                          qtyMode === "QTY"
+                            ? "bg-primary text-primary-foreground"
+                            : "bg-secondary text-muted-foreground"
+                        }`}
+                      >
+                        QTY
+                      </button>
+                    </div>
                   </div>
-                  <div className="h-1 rounded-full bg-red-500 overflow-hidden">
-                    <div
-                      className="h-full bg-green-500 rounded-full"
-                      style={{ width: `${bidPct}%` }}
+                  <div className="flex items-center gap-1">
+                    <button
+                      data-ocid="orders.qty_decrease_button"
+                      type="button"
+                      onClick={() => {
+                        const step =
+                          qtyMode === "LOTS" ? 1 : getLotSize(instrumentKey);
+                        setQuantity(
+                          String(
+                            Math.max(
+                              qtyMode === "LOTS" ? 1 : 0,
+                              Number.parseInt(quantity || "1") - step,
+                            ),
+                          ),
+                        );
+                      }}
+                      className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
+                    >
+                      −
+                    </button>
+                    <input
+                      data-ocid="orders.qty_input"
+                      type="number"
+                      value={quantity}
+                      onChange={(e) => setQuantity(e.target.value)}
+                      className="h-8 flex-1 bg-secondary border border-border text-foreground text-xs rounded px-2 text-center font-mono min-w-0"
+                      placeholder={qtyMode === "LOTS" ? "1" : "0"}
                     />
+                    <button
+                      data-ocid="orders.qty_increase_button"
+                      type="button"
+                      onClick={() => {
+                        const step =
+                          qtyMode === "LOTS" ? 1 : getLotSize(instrumentKey);
+                        setQuantity(
+                          String(Number.parseInt(quantity || "0") + step),
+                        );
+                      }}
+                      className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
+                    >
+                      +
+                    </button>
+                  </div>
+                  {qtyMode === "LOTS" ? (
+                    <p className="text-[9px] text-muted-foreground mt-0.5">
+                      1 lot = {getLotSize(instrumentKey)} · actual:{" "}
+                      {Number.parseInt(quantity || "1") *
+                        getLotSize(instrumentKey)}
+                    </p>
+                  ) : (
+                    (() => {
+                      const ls = getLotSize(instrumentKey);
+                      const raw = Number.parseInt(quantity || "0");
+                      const rounded = Math.round(raw / ls) * ls;
+                      return raw > 0 && raw !== rounded ? (
+                        <p className="text-[9px] text-yellow-500 mt-0.5">
+                          Will round to {rounded} (lot size: {ls})
+                        </p>
+                      ) : raw > 0 ? (
+                        <p className="text-[9px] text-muted-foreground mt-0.5">
+                          Lot size: {ls}
+                        </p>
+                      ) : null;
+                    })()
+                  )}
+                </div>
+                <div>
+                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                    Price
+                  </Label>
+                  <Input
+                    data-ocid="orders.price_input"
+                    type="number"
+                    placeholder="0.00"
+                    value={price}
+                    onChange={(e) => setPrice(e.target.value)}
+                    disabled={orderType === "MARKET"}
+                    className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs disabled:opacity-40"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                    Type
+                  </Label>
+                  <select
+                    data-ocid="orders.type_select"
+                    value={orderType}
+                    onChange={(e) => setOrderType(e.target.value)}
+                    className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2 font-mono"
+                  >
+                    <option value="MARKET">MKT</option>
+                    <option value="LIMIT">LMT</option>
+                    <option value="SL">SL</option>
+                    <option value="SL-M">SL-M</option>
+                  </select>
+                </div>
+                <div>
+                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                    Product
+                  </Label>
+                  <select
+                    data-ocid="orders.product_select"
+                    value={product}
+                    onChange={(e) => setProduct(e.target.value)}
+                    className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2 font-mono"
+                  >
+                    <option value="D">D - NRML/CNC</option>
+                    <option value="I">I - MIS (Intraday)</option>
+                  </select>
+                </div>
+                <div>
+                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                    Validity
+                  </Label>
+                  <select
+                    value={validity}
+                    onChange={(e) => setValidity(e.target.value)}
+                    className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2 font-mono"
+                  >
+                    <option value="DAY">DAY</option>
+                    <option value="IOC">IOC</option>
+                  </select>
+                </div>
+              </div>
+
+              {(orderType === "SL" || orderType === "SL-M") && (
+                <div>
+                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                    Trigger Price
+                  </Label>
+                  <Input
+                    type="number"
+                    placeholder="0.00"
+                    value={triggerPrice}
+                    onChange={(e) => setTriggerPrice(e.target.value)}
+                    className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs"
+                  />
+                </div>
+              )}
+
+              <button
+                data-ocid="orders.submit_button"
+                type="button"
+                onClick={placeOrder}
+                disabled={placing}
+                className={`w-full h-9 rounded text-xs font-bold transition-colors flex items-center justify-center gap-1.5 ${
+                  txType === "BUY"
+                    ? "bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
+                    : "bg-red-600 hover:bg-red-700 text-white disabled:opacity-50"
+                }`}
+              >
+                {placing && <Loader2 className="w-3 h-3 animate-spin" />}
+                {editingOrderId ? "Modify" : txType} {orderType}
+              </button>
+            </div>
+          </div>
+
+          {/* Market Depth in Order Form */}
+          <div className="mx-4 mb-3 border border-border rounded">
+            <div className="flex items-center justify-between px-2 py-1 border-b border-border bg-secondary/50">
+              <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+                Market Depth
+              </span>
+              {orderFormDepthLoading && (
+                <span className="text-[9px] text-muted-foreground">
+                  Loading...
+                </span>
+              )}
+            </div>
+            {!orderFormDepthLoading && !orderFormDepth && (
+              <div className="px-3 py-2 text-[10px] text-muted-foreground italic">
+                Depth unavailable (CORS/API)
+              </div>
+            )}
+            <div className="grid grid-cols-2 divide-x divide-border">
+              <div>
+                <div className="grid grid-cols-2 px-2 py-0.5 border-b border-border">
+                  <span className="text-[9px] text-muted-foreground">
+                    BID QTY
+                  </span>
+                  <span className="text-[9px] text-muted-foreground text-right">
+                    BID
+                  </span>
+                </div>
+                {(orderFormDepth?.bids || Array(5).fill(null)).map((b, i) => (
+                  <div
+                    key={b ? `bid-p-${b.price}` : `bid-e-${i}`}
+                    className="grid grid-cols-2 px-2 py-0.5"
+                  >
+                    <span className="text-[10px] text-green-500 font-mono">
+                      {b ? b.quantity : "—"}
+                    </span>
+                    <span className="text-[10px] text-green-500 font-mono text-right">
+                      {b ? b.price.toFixed(2) : "—"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div>
+                <div className="grid grid-cols-2 px-2 py-0.5 border-b border-border">
+                  <span className="text-[9px] text-muted-foreground">ASK</span>
+                  <span className="text-[9px] text-muted-foreground text-right">
+                    ASK QTY
+                  </span>
+                </div>
+                {(orderFormDepth?.asks || Array(5).fill(null)).map((a, i) => (
+                  <div
+                    key={a ? `ask-p-${a.price}` : `ask-e-${i}`}
+                    className="grid grid-cols-2 px-2 py-0.5"
+                  >
+                    <span className="text-[10px] text-red-500 font-mono">
+                      {a ? a.price.toFixed(2) : "—"}
+                    </span>
+                    <span className="text-[10px] text-red-500 font-mono text-right">
+                      {a ? a.quantity : "—"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            {orderFormDepth && (
+              <div className="px-2 py-1 border-t border-border">
+                {(() => {
+                  const totalBid = orderFormDepth.bids.reduce(
+                    (s, b) => s + b.quantity,
+                    0,
+                  );
+                  const totalAsk = orderFormDepth.asks.reduce(
+                    (s, a) => s + a.quantity,
+                    0,
+                  );
+                  const total = totalBid + totalAsk || 1;
+                  const bidPct = Math.round((totalBid / total) * 100);
+                  return (
+                    <div>
+                      <div className="flex justify-between text-[9px] mb-0.5">
+                        <span className="text-green-500">Buy {bidPct}%</span>
+                        <span className="text-red-500">
+                          Sell {100 - bidPct}%
+                        </span>
+                      </div>
+                      <div className="h-1 rounded-full bg-red-500 overflow-hidden">
+                        <div
+                          className="h-full bg-green-500 rounded-full"
+                          style={{ width: `${bidPct}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+          </div>
+
+          {/* Margin Info */}
+          <div
+            data-ocid="orders.margin_panel"
+            className="mx-4 mb-3 border border-border rounded"
+          >
+            <div className="px-2 py-1 border-b border-border bg-secondary/50">
+              <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+                Margin
+              </span>
+            </div>
+            <div className="grid grid-cols-2 divide-x divide-border">
+              <div className="px-3 py-2">
+                <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">
+                  {isEstimatedMargin ? "Est. Margin" : "Req. Margin"}
+                </div>
+                <div
+                  data-ocid="orders.required_margin"
+                  className="text-xs font-mono font-bold text-amber-400"
+                >
+                  {marginLoading
+                    ? "..."
+                    : requiredMargin !== null
+                      ? `₹${requiredMargin.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                      : "—"}
+                </div>
+              </div>
+              <div className="px-3 py-2">
+                <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">
+                  Available
+                </div>
+                <div
+                  data-ocid="orders.available_margin"
+                  className={`text-xs font-mono font-bold ${
+                    availableMargin !== null &&
+                    requiredMargin !== null &&
+                    availableMargin < requiredMargin
+                      ? "text-red-500"
+                      : "text-green-500"
+                  }`}
+                >
+                  {availableMargin !== null
+                    ? `₹${availableMargin.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                    : "—"}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Order Book */}
+          <div className="p-3">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+                Order Book
+              </p>
+              <button
+                type="button"
+                onClick={fetchOrders}
+                className="w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground"
+              >
+                <RefreshCw
+                  className={`w-3 h-3 ${loadingOrders ? "animate-spin" : ""}`}
+                />
+              </button>
+            </div>
+
+            {/* Filter tabs */}
+            <div className="flex gap-1 mb-2 overflow-x-auto hide-scrollbar">
+              {(["ALL", "PENDING", "SUCCESS", "CANCELLED"] as const).map(
+                (f) => (
+                  <button
+                    key={f}
+                    type="button"
+                    data-ocid={`orders.filter.${f.toLowerCase()}.tab`}
+                    onClick={() => setOrderStatusFilter(f)}
+                    className={`flex-none px-2.5 py-1 rounded text-[10px] font-bold whitespace-nowrap transition-colors ${
+                      orderStatusFilter === f
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-secondary text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {f === "SUCCESS" ? "FILLED" : f}
+                  </button>
+                ),
+              )}
+            </div>
+
+            {loadingOrders ? (
+              <div className="space-y-1.5">
+                {[1, 2, 3].map((i) => (
+                  <div
+                    key={i}
+                    className="h-8 rounded bg-secondary animate-pulse"
+                  />
+                ))}
+              </div>
+            ) : orders.length === 0 ? (
+              <div data-ocid="orders.empty_state" className="py-8 text-center">
+                <p className="text-xs text-muted-foreground">No orders</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table
+                  className="w-full text-xs border-collapse min-w-[480px]"
+                  data-ocid="orders.table"
+                >
+                  <thead>
+                    <tr className="border-b border-border">
+                      <th className="py-1.5 px-2 text-left text-[10px] text-muted-foreground font-semibold tracking-wider">
+                        SYMBOL
+                      </th>
+                      <th className="py-1.5 px-2 text-right text-[10px] text-muted-foreground font-semibold tracking-wider">
+                        QTY
+                      </th>
+                      <th className="py-1.5 px-2 text-right text-[10px] text-muted-foreground font-semibold tracking-wider">
+                        PRICE
+                      </th>
+                      <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
+                        TYPE
+                      </th>
+                      <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
+                        STATUS
+                      </th>
+                      <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
+                        ACT
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {orders
+                      .filter((o) => {
+                        if (orderStatusFilter === "ALL") return true;
+                        if (orderStatusFilter === "PENDING")
+                          return isPendingOrder(o);
+                        if (orderStatusFilter === "SUCCESS")
+                          return ["complete", "traded", "filled"].some((s) =>
+                            o.status.toLowerCase().includes(s),
+                          );
+                        if (orderStatusFilter === "CANCELLED")
+                          return ["cancelled", "rejected"].some((s) =>
+                            o.status.toLowerCase().includes(s),
+                          );
+                        return true;
+                      })
+                      .map((order, i) => (
+                        <tr
+                          key={order.order_id}
+                          data-ocid={`orders.row.${i + 1}`}
+                          className="border-b border-border/50 hover:bg-secondary/40 transition-colors"
+                        >
+                          <td className="py-1.5 px-2">
+                            <p className="font-mono font-bold text-foreground text-xs">
+                              {order.tradingsymbol}
+                            </p>
+                            <p
+                              className={`text-[10px] font-bold ${
+                                order.transaction_type === "BUY"
+                                  ? "text-blue-400"
+                                  : "text-loss"
+                              }`}
+                            >
+                              {order.transaction_type}
+                            </p>
+                          </td>
+                          <td className="py-1.5 px-2 text-right font-mono-data text-foreground">
+                            {order.quantity}
+                          </td>
+                          <td className="py-1.5 px-2 text-right font-mono-data text-foreground">
+                            ₹
+                            {(order.price || order.average_price || 0).toFixed(
+                              2,
+                            )}
+                          </td>
+                          <td className="py-1.5 px-2 text-center">
+                            <span className="text-[10px] font-mono text-muted-foreground">
+                              {order.order_type}
+                            </span>
+                          </td>
+                          <td className="py-1.5 px-2 text-center">
+                            <span
+                              className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${statusBadge(order.status)}`}
+                            >
+                              {order.status}
+                            </span>
+                          </td>
+                          <td className="py-1.5 px-2 text-center">
+                            {isPendingOrder(order) && (
+                              <div className="flex items-center justify-center gap-1">
+                                <button
+                                  type="button"
+                                  data-ocid={`orders.edit_button.${i + 1}`}
+                                  onClick={() => startEditOrder(order)}
+                                  title="Edit order"
+                                  className="w-5 h-5 flex items-center justify-center rounded bg-secondary hover:bg-amber-900/40 text-amber-400 transition-colors"
+                                >
+                                  <Pencil className="w-2.5 h-2.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  data-ocid={`orders.cancel_button.${i + 1}`}
+                                  onClick={() =>
+                                    cancelRegularOrder(order.order_id)
+                                  }
+                                  title="Cancel order"
+                                  className="w-5 h-5 flex items-center justify-center rounded bg-secondary hover:bg-red-900/40 text-red-400 transition-colors"
+                                >
+                                  <X className="w-2.5 h-2.5" />
+                                </button>
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {orderSubTab === "gtt" && (
+        <>
+          {/* GTT Order Form */}
+          <div className="p-4 border-b border-border">
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+                {gttEditId
+                  ? `Update GTT · ${gttEditId.slice(0, 20)}...`
+                  : "Place GTT Order"}
+              </p>
+              {gttEditId && (
+                <button
+                  data-ocid="gtt.cancel_edit_button"
+                  type="button"
+                  onClick={resetGttForm}
+                  className="text-[10px] text-muted-foreground hover:text-foreground underline"
+                >
+                  Cancel Edit
+                </button>
+              )}
+            </div>
+
+            {/* BUY / SELL */}
+            <div className="flex gap-0 mb-3 rounded overflow-hidden border border-border">
+              <button
+                data-ocid="gtt.buy_button"
+                type="button"
+                onClick={() => setGttTxType("BUY")}
+                className={`flex-1 py-2 text-xs font-bold transition-colors ${
+                  gttTxType === "BUY"
+                    ? "bg-blue-600 text-white"
+                    : "bg-secondary text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                BUY
+              </button>
+              <button
+                data-ocid="gtt.sell_button"
+                type="button"
+                onClick={() => setGttTxType("SELL")}
+                className={`flex-1 py-2 text-xs font-bold transition-colors ${
+                  gttTxType === "SELL"
+                    ? "bg-red-600 text-white"
+                    : "bg-secondary text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                SELL
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 gap-2">
+              {/* Instrument token */}
+              <div>
+                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                  Instrument Token
+                </Label>
+                <Input
+                  data-ocid="gtt.instrument_input"
+                  placeholder="NSE_FO|43919"
+                  value={gttInstrumentToken}
+                  onChange={(e) => setGttInstrumentToken(e.target.value)}
+                  className="h-8 mt-1 bg-secondary border-border font-mono text-xs"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                {/* Quantity */}
+                <div>
+                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                    Qty
+                  </Label>
+                  <div className="flex items-center gap-1 mt-1">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setGttQty(
+                          String(
+                            Math.max(1, Number.parseInt(gttQty || "1") - 1),
+                          ),
+                        )
+                      }
+                      className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
+                    >
+                      −
+                    </button>
+                    <input
+                      type="number"
+                      value={gttQty}
+                      onChange={(e) => setGttQty(e.target.value)}
+                      className="h-8 flex-1 bg-secondary border border-border text-foreground text-xs rounded px-2 text-center font-mono min-w-0"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setGttQty(String(Number.parseInt(gttQty || "0") + 1))
+                      }
+                      className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
+                    >
+                      +
+                    </button>
                   </div>
                 </div>
-              );
-            })()}
-          </div>
-        )}
-      </div>
 
-      {/* Margin Info */}
-      <div
-        data-ocid="orders.margin_panel"
-        className="mx-4 mb-3 border border-border rounded"
-      >
-        <div className="px-2 py-1 border-b border-border bg-secondary/50">
-          <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
-            Margin
-          </span>
-        </div>
-        <div className="grid grid-cols-2 divide-x divide-border">
-          <div className="px-3 py-2">
-            <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">
-              {isEstimatedMargin ? "Est. Margin" : "Req. Margin"}
-            </div>
-            <div
-              data-ocid="orders.required_margin"
-              className="text-xs font-mono font-bold text-amber-400"
-            >
-              {marginLoading
-                ? "..."
-                : requiredMargin !== null
-                  ? `₹${requiredMargin.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                  : "—"}
-            </div>
-          </div>
-          <div className="px-3 py-2">
-            <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">
-              Available
-            </div>
-            <div
-              data-ocid="orders.available_margin"
-              className={`text-xs font-mono font-bold ${availableMargin !== null && requiredMargin !== null && availableMargin < requiredMargin ? "text-red-500" : "text-green-500"}`}
-            >
-              {availableMargin !== null
-                ? `₹${availableMargin.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                : "—"}
-            </div>
-          </div>
-        </div>
-      </div>
+                {/* Product */}
+                <div>
+                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                    Product
+                  </Label>
+                  <select
+                    value={gttProduct}
+                    onChange={(e) => setGttProduct(e.target.value)}
+                    className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2 font-mono"
+                  >
+                    <option value="D">D (Delivery)</option>
+                    <option value="I">I (Intraday)</option>
+                    <option value="CNC">CNC</option>
+                  </select>
+                </div>
+              </div>
 
-      {/* Order Book */}
-      <div className="p-3">
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
-            Order Book
-          </p>
-          <button
-            type="button"
-            onClick={fetchOrders}
-            className="w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground"
-          >
-            <RefreshCw
-              className={`w-3 h-3 ${loadingOrders ? "animate-spin" : ""}`}
-            />
-          </button>
-        </div>
+              {/* GTT Type toggle */}
+              <div>
+                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1 block">
+                  GTT Type
+                </Label>
+                <div className="flex gap-0 rounded overflow-hidden border border-border">
+                  <button
+                    data-ocid="gtt.type_single_toggle"
+                    type="button"
+                    onClick={() => setGttType("SINGLE")}
+                    className={`flex-1 py-1.5 text-xs font-bold transition-colors ${
+                      gttType === "SINGLE"
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-secondary text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    SINGLE
+                  </button>
+                  <button
+                    data-ocid="gtt.type_multiple_toggle"
+                    type="button"
+                    onClick={() => setGttType("MULTIPLE")}
+                    className={`flex-1 py-1.5 text-xs font-bold transition-colors ${
+                      gttType === "MULTIPLE"
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-secondary text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    MULTIPLE
+                  </button>
+                </div>
+                {gttType === "MULTIPLE" && (
+                  <p className="text-[9px] text-muted-foreground mt-0.5">
+                    Entry + Target + SL (bracket order)
+                  </p>
+                )}
+              </div>
 
-        {/* Filter tabs */}
-        <div className="flex gap-1 mb-2 overflow-x-auto hide-scrollbar">
-          {(["ALL", "PENDING", "SUCCESS", "CANCELLED"] as const).map((f) => (
-            <button
-              key={f}
-              type="button"
-              data-ocid={`orders.filter.${f.toLowerCase()}.tab`}
-              onClick={() => setOrderStatusFilter(f)}
-              className={`flex-none px-2.5 py-1 rounded text-[10px] font-bold whitespace-nowrap transition-colors ${
-                orderStatusFilter === f
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-secondary text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {f === "SUCCESS" ? "FILLED" : f}
-            </button>
-          ))}
-        </div>
-
-        {loadingOrders ? (
-          <div className="space-y-1.5">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="h-8 rounded bg-secondary animate-pulse" />
-            ))}
-          </div>
-        ) : orders.length === 0 ? (
-          <div data-ocid="orders.empty_state" className="py-8 text-center">
-            <p className="text-xs text-muted-foreground">No orders</p>
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table
-              className="w-full text-xs border-collapse min-w-[420px]"
-              data-ocid="orders.table"
-            >
-              <thead>
-                <tr className="border-b border-border">
-                  <th className="py-1.5 px-2 text-left text-[10px] text-muted-foreground font-semibold tracking-wider">
-                    SYMBOL
-                  </th>
-                  <th className="py-1.5 px-2 text-right text-[10px] text-muted-foreground font-semibold tracking-wider">
-                    QTY
-                  </th>
-                  <th className="py-1.5 px-2 text-right text-[10px] text-muted-foreground font-semibold tracking-wider">
-                    PRICE
-                  </th>
-                  <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                    TYPE
-                  </th>
-                  <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                    STATUS
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {orders
-                  .filter((o) => {
-                    if (orderStatusFilter === "ALL") return true;
-                    if (orderStatusFilter === "PENDING")
-                      return [
-                        "open",
-                        "pending",
-                        "trigger pending",
-                        "after market order req received",
-                        "modify pending",
-                        "cancel pending",
-                      ].some((s) => o.status.toLowerCase().includes(s));
-                    if (orderStatusFilter === "SUCCESS")
-                      return ["complete", "traded", "filled"].some((s) =>
-                        o.status.toLowerCase().includes(s),
-                      );
-                    if (orderStatusFilter === "CANCELLED")
-                      return ["cancelled", "rejected"].some((s) =>
-                        o.status.toLowerCase().includes(s),
-                      );
-                    return true;
-                  })
-                  .map((order, i) => (
-                    <tr
-                      key={order.order_id}
-                      data-ocid={`orders.row.${i + 1}`}
-                      className="border-b border-border/50 hover:bg-secondary/40 transition-colors"
+              {/* Entry trigger */}
+              <div>
+                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                  Entry Trigger Price
+                </Label>
+                <div className="flex gap-1 mt-1">
+                  <Input
+                    type="number"
+                    placeholder="Entry price"
+                    value={gttEntryPrice}
+                    onChange={(e) => setGttEntryPrice(e.target.value)}
+                    className="h-8 flex-1 bg-secondary border-border font-mono text-xs"
+                  />
+                  <div className="flex rounded overflow-hidden border border-border">
+                    <button
+                      type="button"
+                      onClick={() => setGttEntryTriggerType("ABOVE")}
+                      className={`px-2 text-[10px] font-bold transition-colors ${
+                        gttEntryTriggerType === "ABOVE"
+                          ? "bg-blue-600 text-white"
+                          : "bg-secondary text-muted-foreground"
+                      }`}
                     >
-                      <td className="py-1.5 px-2">
-                        <p className="font-mono font-bold text-foreground text-xs">
-                          {order.tradingsymbol}
-                        </p>
-                        <p
-                          className={`text-[10px] font-bold ${
-                            order.transaction_type === "BUY"
-                              ? "text-blue-400"
-                              : "text-loss"
-                          }`}
-                        >
-                          {order.transaction_type}
-                        </p>
-                      </td>
-                      <td className="py-1.5 px-2 text-right font-mono-data text-foreground">
-                        {order.quantity}
-                      </td>
-                      <td className="py-1.5 px-2 text-right font-mono-data text-foreground">
-                        ₹{(order.price || order.average_price || 0).toFixed(2)}
-                      </td>
-                      <td className="py-1.5 px-2 text-center">
-                        <span className="text-[10px] font-mono text-muted-foreground">
-                          {order.order_type}
-                        </span>
-                      </td>
-                      <td className="py-1.5 px-2 text-center">
-                        <span
-                          className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${statusBadge(order.status)}`}
-                        >
-                          {order.status}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
+                      ↑ ABOVE
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setGttEntryTriggerType("BELOW")}
+                      className={`px-2 text-[10px] font-bold transition-colors ${
+                        gttEntryTriggerType === "BELOW"
+                          ? "bg-amber-600 text-white"
+                          : "bg-secondary text-muted-foreground"
+                      }`}
+                    >
+                      ↓ BELOW
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* MULTIPLE: target + SL + trailing */}
+              {gttType === "MULTIPLE" && (
+                <>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                        Target Price
+                      </Label>
+                      <Input
+                        type="number"
+                        placeholder="Target price"
+                        value={gttTargetPrice}
+                        onChange={(e) => setGttTargetPrice(e.target.value)}
+                        className="h-8 mt-1 bg-secondary border-border font-mono text-xs"
+                      />
+                    </div>
+                    <div>
+                      <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                        SL Price
+                      </Label>
+                      <Input
+                        type="number"
+                        placeholder="Stop-loss price"
+                        value={gttSlPrice}
+                        onChange={(e) => setGttSlPrice(e.target.value)}
+                        className="h-8 mt-1 bg-secondary border-border font-mono text-xs"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                      Trailing Gap (optional)
+                    </Label>
+                    <Input
+                      type="number"
+                      placeholder="e.g. 0.1 — trailing SL gap"
+                      value={gttTrailingGap}
+                      onChange={(e) => setGttTrailingGap(e.target.value)}
+                      className="h-8 mt-1 bg-secondary border-border font-mono text-xs"
+                    />
+                    <p className="text-[9px] text-muted-foreground mt-0.5">
+                      Leave blank for fixed SL. Set a value for trailing SL.
+                    </p>
+                  </div>
+                </>
+              )}
+
+              <button
+                data-ocid="gtt.submit_button"
+                type="button"
+                onClick={submitGTTOrder}
+                disabled={gttPlacing}
+                className={`w-full h-9 rounded text-xs font-bold transition-colors flex items-center justify-center gap-1.5 ${
+                  gttTxType === "BUY"
+                    ? "bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
+                    : "bg-red-600 hover:bg-red-700 text-white disabled:opacity-50"
+                }`}
+              >
+                {gttPlacing && <Loader2 className="w-3 h-3 animate-spin" />}
+                {gttEditId ? "Update GTT" : "Place GTT"}
+              </button>
+            </div>
           </div>
-        )}
-      </div>
+
+          {/* GTT Order Book */}
+          <div className="p-3">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+                GTT Orders
+              </p>
+              <button
+                type="button"
+                onClick={fetchGTTOrders}
+                className="w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground"
+              >
+                <RefreshCw
+                  className={`w-3 h-3 ${gttLoading ? "animate-spin" : ""}`}
+                />
+              </button>
+            </div>
+
+            {gttLoading && gttOrders.length === 0 ? (
+              <div className="space-y-1.5">
+                {[1, 2, 3].map((i) => (
+                  <div
+                    key={i}
+                    className="h-10 rounded bg-secondary animate-pulse"
+                  />
+                ))}
+              </div>
+            ) : gttOrders.length === 0 ? (
+              <div data-ocid="gtt.empty_state" className="py-8 text-center">
+                <p className="text-xs text-muted-foreground">No GTT orders</p>
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  Use the form above to place a GTT order
+                </p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table
+                  className="w-full text-xs border-collapse min-w-[520px]"
+                  data-ocid="gtt.table"
+                >
+                  <thead>
+                    <tr className="border-b border-border">
+                      <th className="py-1.5 px-2 text-left text-[10px] text-muted-foreground font-semibold tracking-wider">
+                        SYMBOL
+                      </th>
+                      <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
+                        TYPE
+                      </th>
+                      <th className="py-1.5 px-2 text-right text-[10px] text-muted-foreground font-semibold tracking-wider">
+                        QTY
+                      </th>
+                      <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
+                        RULES
+                      </th>
+                      <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
+                        STATUS
+                      </th>
+                      <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
+                        ACT
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {gttOrders.map((gtt, i) => {
+                      const entryRule = (gtt.rules || []).find(
+                        (r: any) => r.strategy === "ENTRY",
+                      );
+                      const tgtRule = (gtt.rules || []).find(
+                        (r: any) => r.strategy === "TARGET",
+                      );
+                      const slRule = (gtt.rules || []).find(
+                        (r: any) => r.strategy === "STOPLOSS",
+                      );
+                      return (
+                        <tr
+                          key={gtt.gtt_order_id || gtt.id || i}
+                          data-ocid={`gtt.row.${i + 1}`}
+                          className="border-b border-border/50 hover:bg-secondary/40 transition-colors"
+                        >
+                          <td className="py-1.5 px-2">
+                            <p className="font-mono font-bold text-foreground text-xs">
+                              {gtt.instrument_token || gtt.tradingsymbol || "—"}
+                            </p>
+                            <p
+                              className={`text-[10px] font-bold ${
+                                gtt.transaction_type === "BUY"
+                                  ? "text-blue-400"
+                                  : "text-loss"
+                              }`}
+                            >
+                              {gtt.transaction_type}
+                            </p>
+                          </td>
+                          <td className="py-1.5 px-2 text-center">
+                            <span className="text-[10px] font-mono text-muted-foreground">
+                              {gtt.type}
+                            </span>
+                          </td>
+                          <td className="py-1.5 px-2 text-right font-mono-data text-foreground">
+                            {gtt.quantity}
+                          </td>
+                          <td className="py-1.5 px-2">
+                            <div className="flex flex-wrap gap-0.5 justify-center">
+                              {entryRule && (
+                                <span className="text-[9px] px-1 py-0.5 rounded bg-blue-950 text-blue-400 border border-blue-800/40 font-mono">
+                                  E:{entryRule.trigger_price}
+                                </span>
+                              )}
+                              {tgtRule && (
+                                <span className="text-[9px] px-1 py-0.5 rounded bg-green-950 text-green-400 border border-green-800/40 font-mono">
+                                  T:{tgtRule.trigger_price}
+                                </span>
+                              )}
+                              {slRule && (
+                                <span className="text-[9px] px-1 py-0.5 rounded bg-red-950 text-red-400 border border-red-800/40 font-mono">
+                                  SL:{slRule.trigger_price}
+                                  {slRule.trailing_gap
+                                    ? `(T${slRule.trailing_gap})`
+                                    : ""}
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="py-1.5 px-2 text-center">
+                            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded border bg-secondary text-muted-foreground border-border">
+                              {gtt.status || "active"}
+                            </span>
+                          </td>
+                          <td className="py-1.5 px-2 text-center">
+                            <div className="flex items-center justify-center gap-1">
+                              <button
+                                type="button"
+                                data-ocid={`gtt.edit_button.${i + 1}`}
+                                onClick={() => startEditGTT(gtt)}
+                                title="Edit GTT"
+                                className="w-5 h-5 flex items-center justify-center rounded bg-secondary hover:bg-amber-900/40 text-amber-400 transition-colors"
+                              >
+                                <Pencil className="w-2.5 h-2.5" />
+                              </button>
+                              <button
+                                type="button"
+                                data-ocid={`gtt.cancel_button.${i + 1}`}
+                                onClick={() =>
+                                  cancelGTTOrder(gtt.gtt_order_id || gtt.id)
+                                }
+                                title="Cancel GTT"
+                                className="w-5 h-5 flex items-center justify-center rounded bg-secondary hover:bg-red-900/40 text-red-400 transition-colors"
+                              >
+                                <X className="w-2.5 h-2.5" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -2701,12 +3686,27 @@ function TrendAnalysisPanel({
   expiries,
   selectedExpiry,
   tradeSettings,
+  greeksData,
+  expanded = true,
+  onToggleExpanded,
 }: {
   chain: OptionData[];
   underlyingLtp: number;
   expiries?: string[];
   selectedExpiry?: string;
   tradeSettings?: TradeSettings;
+  greeksData?: Record<
+    string,
+    {
+      delta?: number;
+      gamma?: number;
+      theta?: number;
+      vega?: number;
+      iv?: number;
+    }
+  >;
+  expanded?: boolean;
+  onToggleExpanded?: () => void;
 }) {
   if (chain.length === 0) return null;
 
@@ -2803,6 +3803,14 @@ function TrendAnalysisPanel({
   if (atm && maxPeOiRow.strike_price < atm.strike_price) bullSignals++;
   else bearSignals++;
 
+  // Signal 5: Greeks-based delta momentum
+  if (greeksData && atm) {
+    const atmCeKey = atm.call_options?.instrument_key;
+    const atmCeDelta = atmCeKey ? (greeksData[atmCeKey]?.delta ?? 0) : 0;
+    if (atmCeDelta > 0.52) bullSignals++;
+    else if (atmCeDelta < 0.48 && atmCeDelta !== 0) bearSignals++;
+  }
+
   const trend =
     bullSignals >= 3 ? "BULLISH" : bearSignals >= 3 ? "BEARISH" : "NEUTRAL";
 
@@ -2828,6 +3836,22 @@ function TrendAnalysisPanel({
     } else if (atmIdx >= 0) {
       // ATM call
       recommendedStrike = atm?.strike_price ?? 0;
+    }
+    // Greeks: find best delta strike near 0.45
+    if (greeksData && atm) {
+      let closestDelta = Math.abs(
+        (greeksData[atm.call_options?.instrument_key ?? ""]?.delta ?? 0.5) -
+          0.45,
+      );
+      for (const row of chain) {
+        const key = row.call_options?.instrument_key;
+        if (!key || !greeksData[key]) continue;
+        const d = Math.abs((greeksData[key].delta ?? 0.5) - 0.45);
+        if (d < closestDelta) {
+          closestDelta = d;
+          recommendedStrike = row.strike_price;
+        }
+      }
     }
   } else if (trend === "BEARISH") {
     action = "BUY PUT";
@@ -2872,6 +3896,21 @@ function TrendAnalysisPanel({
   reasoning.push(
     `CE resistance at ${maxCeOiRow.strike_price.toLocaleString("en-IN")}, PE support at ${maxPeOiRow.strike_price.toLocaleString("en-IN")} — ${bullSignals} bullish / ${bearSignals} bearish signals.`,
   );
+  if (greeksData && atm) {
+    const atmCeKey = atm.call_options?.instrument_key;
+    const atmDelta = atmCeKey ? (greeksData[atmCeKey]?.delta ?? null) : null;
+    const atmIV = atmCeKey ? (greeksData[atmCeKey]?.iv ?? null) : null;
+    if (atmDelta !== null) {
+      reasoning.push(
+        `ATM CE Delta: ${atmDelta.toFixed(3)} — ${atmDelta > 0.5 ? "bullish momentum (delta above 0.50)" : "bearish bias (delta below 0.50)"}.`,
+      );
+    }
+    if (atmIV !== null) {
+      reasoning.push(
+        `ATM IV: ${atmIV.toFixed(1)}% — ${atmIV > 25 ? "elevated volatility, option premiums are rich" : "low IV, options are relatively cheap"}.`,
+      );
+    }
+  }
 
   // ── Style classes ─────────────────────────────────────────────────────────
   const actionBg =
@@ -2891,11 +3930,11 @@ function TrendAnalysisPanel({
   return (
     <div
       data-ocid="options.trend_panel"
-      className="p-3 border-b border-border"
+      className="border-b border-border"
       style={{ background: "oklch(0.10 0.012 250)" }}
     >
-      {/* Header */}
-      <div className="flex items-center gap-2 mb-3">
+      {/* Header with toggle */}
+      <div className="flex items-center gap-2 px-3 py-2">
         <BarChart2 className="w-3.5 h-3.5 text-primary" />
         <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
           AI Option Chain Analysis
@@ -2903,170 +3942,186 @@ function TrendAnalysisPanel({
         <span className="ml-auto text-[9px] text-muted-foreground/50 italic">
           100% data-driven signals
         </span>
+        {onToggleExpanded && (
+          <button
+            type="button"
+            data-ocid="options.ai_panel.toggle"
+            className="ml-1 p-0.5 rounded hover:bg-secondary/60 transition-colors text-muted-foreground hover:text-foreground"
+            onClick={onToggleExpanded}
+            aria-label={expanded ? "Minimize AI panel" : "Expand AI panel"}
+          >
+            <ChevronDown
+              className={`w-4 h-4 transition-transform duration-200${expanded ? "" : " rotate-90"}`}
+            />
+          </button>
+        )}
       </div>
-
-      {/* Main recommendation card */}
-      <div
-        data-ocid="options.ai.card"
-        className={`rounded-lg border p-3 mb-3 ${actionBg}`}
-      >
-        {/* Action + Confidence row */}
-        <div className="flex items-center gap-2 mb-2">
-          <span
-            className={`text-base font-black tracking-tight px-3 py-1 rounded-md border ${actionBg}`}
-          >
-            {action === "BUY CALL"
-              ? "▲ BUY CALL"
-              : action === "BUY PUT"
-                ? "▼ BUY PUT"
-                : "~ NEUTRAL"}
-          </span>
-          <span
-            className={`text-[10px] font-bold px-2 py-0.5 rounded border ${confCls}`}
-          >
-            {confidence}
-          </span>
-          <span className="text-[10px] text-muted-foreground ml-auto">
-            Strike:{" "}
-            <span className="font-mono-data font-bold text-foreground">
-              {recommendedStrike > 0
-                ? recommendedStrike.toLocaleString("en-IN")
-                : "—"}
-            </span>
-          </span>
-        </div>
-
-        {/* Strike + Expiry */}
-        <div className="grid grid-cols-2 gap-2 mb-2">
-          <div>
-            <p className="text-[9px] text-muted-foreground mb-0.5 uppercase tracking-wider">
-              Strike Price
-            </p>
-            <p className="font-mono-data text-xl font-black text-foreground">
-              {recommendedStrike > 0
-                ? recommendedStrike.toLocaleString("en-IN")
-                : "—"}
-            </p>
-          </div>
-          <div>
-            <p className="text-[9px] text-muted-foreground mb-0.5 uppercase tracking-wider">
-              Expiry
-            </p>
-            <p className="font-mono-data text-sm font-bold text-foreground">
-              {autoExpiry}
-            </p>
-          </div>
-        </div>
-
-        {/* Entry / SL / Target */}
-        {recLtp > 0 &&
-          (() => {
-            const slPct = (tradeSettings?.slPct ?? 25) / 100;
-            const sl = recLtp * (1 - slPct);
-            const risk = recLtp - sl;
-            const target1 = recLtp + risk * (tradeSettings?.tgt1RR ?? 2);
-            const target2 = recLtp + risk * (tradeSettings?.tgt2RR ?? 3);
-            return (
-              <div className="flex mb-2 rounded-lg border border-border bg-card overflow-hidden">
-                <div className="flex-1 text-center py-2 px-1">
-                  <p className="text-[8px] text-muted-foreground mb-1 uppercase tracking-widest font-semibold">
-                    Buy Price
-                  </p>
-                  <p className="font-mono-data text-sm font-black text-blue-300">
-                    ₹{recLtp.toFixed(2)}
-                  </p>
-                </div>
-                <div className="flex-1 text-center py-2 px-1 border-l border-border">
-                  <p className="text-[8px] text-muted-foreground mb-1 uppercase tracking-widest font-semibold">
-                    SL
-                  </p>
-                  <p className="font-mono-data text-sm font-black text-red-400">
-                    ₹{sl.toFixed(2)}
-                  </p>
-                </div>
-                <div className="flex-1 text-center py-2 px-1 border-l border-border">
-                  <p className="text-[8px] text-muted-foreground mb-1 uppercase tracking-widest font-semibold">
-                    TGT1
-                  </p>
-                  <p className="font-mono-data text-sm font-black text-green-400">
-                    ₹{target1.toFixed(2)}
-                  </p>
-                </div>
-                <div className="flex-1 text-center py-2 px-1 border-l border-border">
-                  <p className="text-[8px] text-muted-foreground mb-1 uppercase tracking-widest font-semibold">
-                    TGT2
-                  </p>
-                  <p className="font-mono-data text-sm font-black text-emerald-300">
-                    ₹{target2.toFixed(2)}
-                  </p>
-                </div>
-              </div>
-            );
-          })()}
-
-        {/* Compact metrics row with hover tooltip */}
-        <div className="relative group mt-1">
-          {/* Compact metrics — always visible */}
-          <div className="flex gap-3 flex-wrap text-[10px] cursor-default">
-            <span className="text-muted-foreground">
-              PCR{" "}
-              <span className="font-mono-data text-foreground">
-                {PCR.toFixed(2)}
-              </span>
-            </span>
-            <span className="text-muted-foreground">
-              Max Pain{" "}
-              <span className="font-mono-data text-amber-300">
-                {maxPainStrike.toLocaleString("en-IN")}
-              </span>
-            </span>
-            <span className="text-muted-foreground">
-              CE Res{" "}
-              <span className="font-mono-data text-red-300">
-                {maxCeOiRow.strike_price.toLocaleString("en-IN")}
-              </span>
-            </span>
-            <span className="text-muted-foreground">
-              PE Sup{" "}
-              <span className="font-mono-data text-green-300">
-                {maxPeOiRow.strike_price.toLocaleString("en-IN")}
-              </span>
-            </span>
-            <span className="text-muted-foreground">
-              OI Hot{" "}
-              <span className="font-mono-data text-foreground/70">
-                {oiMomentumRow.strike_price.toLocaleString("en-IN")}
-              </span>
-            </span>
-            <span className="text-[9px] text-muted-foreground/40 italic ml-auto">
-              hover for details
-            </span>
-          </div>
-          {/* Hover tooltip — full reasoning */}
+      {expanded && (
+        <div className="p-3">
+          {/* Main recommendation card */}
           <div
-            className="absolute left-0 top-full mt-1 z-50 w-full invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-opacity duration-150 p-2 rounded-md border border-border shadow-xl space-y-1"
-            style={{ background: "oklch(0.13 0.012 250)" }}
+            data-ocid="options.ai.card"
+            className={`rounded-lg border p-3 mb-3 ${actionBg}`}
           >
-            {[
-              ["📊", reasoning[0]],
-              ["🎯", reasoning[1]],
-              ["📈", reasoning[2]],
-            ].map(([icon, line]) =>
-              line ? (
-                <p
-                  key={icon as string}
-                  className="text-[10px] text-muted-foreground leading-relaxed"
-                >
-                  {icon} {line}
+            {/* Action + Confidence row */}
+            <div className="flex items-center gap-2 mb-2">
+              <span
+                className={`text-base font-black tracking-tight px-3 py-1 rounded-md border ${actionBg}`}
+              >
+                {action === "BUY CALL"
+                  ? "▲ BUY CALL"
+                  : action === "BUY PUT"
+                    ? "▼ BUY PUT"
+                    : "~ NEUTRAL"}
+              </span>
+              <span
+                className={`text-[10px] font-bold px-2 py-0.5 rounded border ${confCls}`}
+              >
+                {confidence}
+              </span>
+              <span className="text-[10px] text-muted-foreground ml-auto">
+                Strike:{" "}
+                <span className="font-mono-data font-bold text-foreground">
+                  {recommendedStrike > 0
+                    ? recommendedStrike.toLocaleString("en-IN")
+                    : "—"}
+                </span>
+              </span>
+            </div>
+
+            {/* Strike + Expiry */}
+            <div className="grid grid-cols-2 gap-2 mb-2">
+              <div>
+                <p className="text-[9px] text-muted-foreground mb-0.5 uppercase tracking-wider">
+                  Strike Price
                 </p>
-              ) : null,
-            )}
+                <p className="font-mono-data text-xl font-black text-foreground">
+                  {recommendedStrike > 0
+                    ? recommendedStrike.toLocaleString("en-IN")
+                    : "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-[9px] text-muted-foreground mb-0.5 uppercase tracking-wider">
+                  Expiry
+                </p>
+                <p className="font-mono-data text-sm font-bold text-foreground">
+                  {autoExpiry}
+                </p>
+              </div>
+            </div>
+
+            {/* Entry / SL / Target */}
+            {recLtp > 0 &&
+              (() => {
+                const slPct = (tradeSettings?.slPct ?? 25) / 100;
+                const sl = recLtp * (1 - slPct);
+                const risk = recLtp - sl;
+                const target1 = recLtp + risk * (tradeSettings?.tgt1RR ?? 2);
+                const target2 = recLtp + risk * (tradeSettings?.tgt2RR ?? 3);
+                return (
+                  <div className="flex mb-2 rounded-lg border border-border bg-card overflow-hidden">
+                    <div className="flex-1 text-center py-2 px-1">
+                      <p className="text-[8px] text-muted-foreground mb-1 uppercase tracking-widest font-semibold">
+                        Buy Price
+                      </p>
+                      <p className="font-mono-data text-sm font-black text-blue-300">
+                        ₹{recLtp.toFixed(2)}
+                      </p>
+                    </div>
+                    <div className="flex-1 text-center py-2 px-1 border-l border-border">
+                      <p className="text-[8px] text-muted-foreground mb-1 uppercase tracking-widest font-semibold">
+                        SL
+                      </p>
+                      <p className="font-mono-data text-sm font-black text-red-400">
+                        ₹{sl.toFixed(2)}
+                      </p>
+                    </div>
+                    <div className="flex-1 text-center py-2 px-1 border-l border-border">
+                      <p className="text-[8px] text-muted-foreground mb-1 uppercase tracking-widest font-semibold">
+                        TGT1
+                      </p>
+                      <p className="font-mono-data text-sm font-black text-green-400">
+                        ₹{target1.toFixed(2)}
+                      </p>
+                    </div>
+                    <div className="flex-1 text-center py-2 px-1 border-l border-border">
+                      <p className="text-[8px] text-muted-foreground mb-1 uppercase tracking-widest font-semibold">
+                        TGT2
+                      </p>
+                      <p className="font-mono-data text-sm font-black text-emerald-300">
+                        ₹{target2.toFixed(2)}
+                      </p>
+                    </div>
+                  </div>
+                );
+              })()}
+
+            {/* Compact metrics row with hover tooltip */}
+            <div className="relative group mt-1">
+              {/* Compact metrics — always visible */}
+              <div className="flex gap-3 flex-wrap text-[10px] cursor-default">
+                <span className="text-muted-foreground">
+                  PCR{" "}
+                  <span className="font-mono-data text-foreground">
+                    {PCR.toFixed(2)}
+                  </span>
+                </span>
+                <span className="text-muted-foreground">
+                  Max Pain{" "}
+                  <span className="font-mono-data text-amber-300">
+                    {maxPainStrike.toLocaleString("en-IN")}
+                  </span>
+                </span>
+                <span className="text-muted-foreground">
+                  CE Res{" "}
+                  <span className="font-mono-data text-red-300">
+                    {maxCeOiRow.strike_price.toLocaleString("en-IN")}
+                  </span>
+                </span>
+                <span className="text-muted-foreground">
+                  PE Sup{" "}
+                  <span className="font-mono-data text-green-300">
+                    {maxPeOiRow.strike_price.toLocaleString("en-IN")}
+                  </span>
+                </span>
+                <span className="text-muted-foreground">
+                  OI Hot{" "}
+                  <span className="font-mono-data text-foreground/70">
+                    {oiMomentumRow.strike_price.toLocaleString("en-IN")}
+                  </span>
+                </span>
+                <span className="text-[9px] text-muted-foreground/40 italic ml-auto">
+                  hover for details
+                </span>
+              </div>
+              {/* Hover tooltip — full reasoning */}
+              <div
+                className="absolute left-0 top-full mt-1 z-50 w-full invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-opacity duration-150 p-2 rounded-md border border-border shadow-xl space-y-1"
+                style={{ background: "oklch(0.13 0.012 250)" }}
+              >
+                {[
+                  ["📊", reasoning[0]],
+                  ["🎯", reasoning[1]],
+                  ["📈", reasoning[2]],
+                ].map(([icon, line]) =>
+                  line ? (
+                    <p
+                      key={icon as string}
+                      className="text-[10px] text-muted-foreground leading-relaxed"
+                    >
+                      {icon} {line}
+                    </p>
+                  ) : null,
+                )}
+              </div>
+            </div>
           </div>
+          <p className="text-[9px] text-muted-foreground/50 italic text-center">
+            ⚠️ AI analysis based on OI data. Trade at your own risk.
+          </p>
         </div>
-      </div>
-      <p className="text-[9px] text-muted-foreground/50 italic text-center">
-        ⚠️ AI analysis based on OI data. Trade at your own risk.
-      </p>
+      )}
     </div>
   );
 }
@@ -3711,7 +4766,7 @@ const OptionChainHeader = memo(function OptionChainHeader() {
     <thead className="sticky top-0 z-10">
       <tr style={{ background: "oklch(var(--card))" }}>
         <th
-          colSpan={4}
+          colSpan={8}
           className="py-1.5 px-2 text-center text-[10px] font-bold tracking-wider border-b border-r border-border"
           style={{
             color: "oklch(0.64 0.2 145)",
@@ -3724,7 +4779,7 @@ const OptionChainHeader = memo(function OptionChainHeader() {
           STRIKE
         </th>
         <th
-          colSpan={4}
+          colSpan={8}
           className="py-1.5 px-2 text-center text-[10px] font-bold tracking-wider border-b border-l border-border"
           style={{
             color: "oklch(0.62 0.22 22)",
@@ -3735,7 +4790,7 @@ const OptionChainHeader = memo(function OptionChainHeader() {
         </th>
       </tr>
       <tr style={{ background: "oklch(var(--card))" }}>
-        {["LTP", "OI", "VOL", "IV%"].map((h) => (
+        {["LTP", "OI", "VOL", "IV%", "Δ", "Γ", "Θ", "Vega"].map((h) => (
           <th
             key={h}
             className="py-1 px-2 text-right text-[10px] text-muted-foreground font-semibold border-b border-border"
@@ -3744,7 +4799,7 @@ const OptionChainHeader = memo(function OptionChainHeader() {
           </th>
         ))}
         <th className="py-1 px-2 border-b border-border" />
-        {["LTP", "OI", "VOL", "IV"].map((h) => (
+        {["LTP", "OI", "VOL", "IV", "Vega", "Θ", "Γ", "Δ"].map((h) => (
           <th
             key={h}
             className="py-1 px-2 text-left text-[10px] text-muted-foreground font-semibold border-b border-border"
@@ -3763,6 +4818,7 @@ function OptionChainTab({
   initialUnderlying,
   tradeSettings,
   onBuyStrike,
+  onUnderlyingChange,
 }: {
   token: string;
   indexTicks: Record<string, TickData>;
@@ -3773,6 +4829,7 @@ function OptionChainTab({
     ltp: number,
     txType: "BUY" | "SELL",
   ) => void;
+  onUnderlyingChange?: (underlying: string) => void;
 }) {
   const [underlying, setUnderlying] = useState<string>(
     initialUnderlying ?? "NSE_INDEX|Nifty 50",
@@ -3884,6 +4941,20 @@ function OptionChainTab({
     ? chain.findIndex((r) => r.strike_price === atm.strike_price)
     : -1;
   const [showAllStrikes, setShowAllStrikes] = useState(false);
+  const [aiPanelExpanded, setAiPanelExpanded] = useState(true);
+  const [chainPanelExpanded, setChainPanelExpanded] = useState(true);
+  const [greeksData, setGreeksData] = useState<
+    Record<
+      string,
+      {
+        delta?: number;
+        gamma?: number;
+        theta?: number;
+        vega?: number;
+        iv?: number;
+      }
+    >
+  >({});
   const [sidePanel, setSidePanel] = useState<{
     instrumentKey: string;
     ltp: number;
@@ -3904,6 +4975,68 @@ function OptionChainTab({
     if (node) node.scrollIntoView({ block: "center", behavior: "smooth" });
   }, []);
 
+  // Calculate Greeks locally using Black-Scholes every second
+  // biome-ignore lint/correctness/useExhaustiveDependencies: interval recalculates on data change
+  useEffect(() => {
+    if (!expiry || displayChain.length === 0 || underlyingLtp <= 0) return;
+
+    const calcAllGreeks = () => {
+      const today = new Date();
+      const expiryDate = new Date(expiry);
+      const T = Math.max(
+        (expiryDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24 * 365),
+        0.001,
+      );
+      const r = 0.065;
+      const S = underlyingLtp;
+
+      const newGreeks: Record<
+        string,
+        {
+          delta?: number;
+          gamma?: number;
+          theta?: number;
+          vega?: number;
+          iv?: number;
+        }
+      > = {};
+
+      for (const row of displayChain) {
+        if (row.call_options?.instrument_key) {
+          const K = row.strike_price;
+          const ltp = row.call_options.market_data?.ltp ?? 0;
+          const iv = ltp > 0 ? impliedVolatility(ltp, S, K, T, r, "CE") : 0.2;
+          const greeks = blackScholes(S, K, T, r, iv, "CE");
+          newGreeks[row.call_options.instrument_key] = {
+            delta: greeks.delta,
+            gamma: greeks.gamma,
+            theta: greeks.theta,
+            vega: greeks.vega,
+            iv: iv * 100,
+          };
+        }
+        if (row.put_options?.instrument_key) {
+          const K = row.strike_price;
+          const ltp = row.put_options.market_data?.ltp ?? 0;
+          const iv = ltp > 0 ? impliedVolatility(ltp, S, K, T, r, "PE") : 0.2;
+          const greeks = blackScholes(S, K, T, r, iv, "PE");
+          newGreeks[row.put_options.instrument_key] = {
+            delta: greeks.delta,
+            gamma: greeks.gamma,
+            theta: greeks.theta,
+            vega: greeks.vega,
+            iv: iv * 100,
+          };
+        }
+      }
+      setGreeksData(newGreeks);
+    };
+
+    calcAllGreeks();
+    const id = setInterval(calcAllGreeks, 1000);
+    return () => clearInterval(id);
+  }, [expiry, displayChain, underlyingLtp]);
+
   return (
     <div className="flex flex-col h-full">
       {/* Trend Analysis Panel */}
@@ -3913,205 +5046,277 @@ function OptionChainTab({
         expiries={expiryDates}
         selectedExpiry={expiry}
         tradeSettings={tradeSettings}
+        greeksData={greeksData}
+        expanded={aiPanelExpanded}
+        onToggleExpanded={() => setAiPanelExpanded((v) => !v)}
       />
-      {/* Controls */}
+      {/* Option Chain Header with toggle */}
       <div
-        className="p-3 border-b border-border space-y-2"
+        className="flex items-center justify-between px-3 py-1.5 border-b border-border"
         style={{ background: "oklch(var(--card))" }}
       >
-        {/* Underlying tabs */}
-        <div className="flex gap-1">
-          {OPTION_UNDERLYINGS.map((u) => (
-            <button
-              key={u.key}
-              data-ocid={`options.expiry_tab.${OPTION_UNDERLYINGS.findIndex((x) => x.key === u.key) + 1}`}
-              type="button"
-              onClick={() => setUnderlying(u.key)}
-              className={`px-3 py-1.5 rounded text-xs font-bold border transition-colors ${
-                underlying === u.key
-                  ? "bg-primary/20 text-primary border-primary/50"
-                  : "bg-secondary text-muted-foreground border-border hover:text-foreground"
-              }`}
-            >
-              {u.label}
-              {indexTicks[u.key]?.ltp ? (
-                <span className="ml-1 font-mono-data opacity-70">
-                  {indexTicks[u.key].ltp.toFixed(0)}
-                </span>
-              ) : null}
-            </button>
-          ))}
+        <div className="flex items-center gap-2">
+          <LineChart className="w-3.5 h-3.5 text-primary" />
+          <span className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+            Option Chain
+          </span>
         </div>
-
-        {/* Expiry tabs — horizontally scrollable */}
-        <div
-          className="flex gap-1.5 overflow-x-auto pb-1 scrollbar-none"
-          data-ocid="options.expiry_tabs"
+        <button
+          type="button"
+          data-ocid="options.chain_panel.toggle"
+          className="p-0.5 rounded hover:bg-secondary/60 transition-colors text-muted-foreground hover:text-foreground"
+          onClick={() => setChainPanelExpanded((v) => !v)}
+          aria-label={
+            chainPanelExpanded ? "Minimize chain panel" : "Expand chain panel"
+          }
         >
-          {loadingExpiry ? (
-            <span className="text-[10px] text-muted-foreground px-2 py-1">
-              Loading expiries...
-            </span>
-          ) : (
-            expiryDates.map((d, i) => (
-              <button
-                key={d}
-                type="button"
-                ref={expiry === d ? selectedExpiryRef : undefined}
-                data-ocid={`options.expiry_tab.${i + 1}`}
-                onClick={() => setExpiry(d)}
-                className={`shrink-0 px-3 py-1 rounded-full text-[10px] font-mono font-bold border transition-colors whitespace-nowrap ${
-                  expiry === d
-                    ? "bg-primary/20 text-primary border-primary/50"
-                    : "bg-secondary text-muted-foreground border-border hover:text-foreground"
-                }`}
-              >
-                {d}
-              </button>
-            ))
-          )}
-        </div>
+          <ChevronDown
+            className={`w-4 h-4 transition-transform duration-200${chainPanelExpanded ? "" : " -rotate-90"}`}
+          />
+        </button>
       </div>
+      {chainPanelExpanded && (
+        <>
+          {/* Controls */}
+          <div
+            className="p-3 border-b border-border space-y-2"
+            style={{ background: "oklch(var(--card))" }}
+          >
+            {/* Underlying tabs */}
+            <div className="flex gap-1">
+              {OPTION_UNDERLYINGS.map((u) => (
+                <button
+                  key={u.key}
+                  data-ocid={`options.expiry_tab.${OPTION_UNDERLYINGS.findIndex((x) => x.key === u.key) + 1}`}
+                  type="button"
+                  onClick={() => {
+                    setUnderlying(u.key);
+                    onUnderlyingChange?.(u.key);
+                  }}
+                  className={`px-3 py-1.5 rounded text-xs font-bold border transition-colors ${
+                    underlying === u.key
+                      ? "bg-primary/20 text-primary border-primary/50"
+                      : "bg-secondary text-muted-foreground border-border hover:text-foreground"
+                  }`}
+                >
+                  {u.label}
+                  {indexTicks[u.key]?.ltp ? (
+                    <span className="ml-1 font-mono-data opacity-70">
+                      {indexTicks[u.key].ltp.toFixed(0)}
+                    </span>
+                  ) : null}
+                </button>
+              ))}
+            </div>
 
-      {/* Chain Table */}
-      {loading ? (
-        <div className="p-4 space-y-1.5">
-          {[1, 2, 3, 4, 5].map((i) => (
-            <div key={i} className="h-8 rounded bg-secondary animate-pulse" />
-          ))}
-        </div>
-      ) : chain.length === 0 ? (
-        <div className="py-12 text-center">
-          <LineChart className="w-7 h-7 text-muted-foreground/30 mx-auto mb-2" />
-          <p className="text-xs text-muted-foreground">
-            {expiry
-              ? "Loading option chain..."
-              : "Select an index to load option chain"}
-          </p>
-        </div>
-      ) : (
-        <div className="overflow-auto flex-1" data-ocid="options.table">
-          <table className="w-full text-xs border-collapse min-w-[560px]">
-            <OptionChainHeader />
-            <tbody>
-              {displayChain.map((row) => {
-                const isAtm = atm?.strike_price === row.strike_price;
-                const ce = row.call_options?.market_data ?? {};
-                const pe = row.put_options?.market_data ?? {};
-                const ceIk = row.call_options?.instrument_key;
-                const peIk = row.put_options?.instrument_key;
-                return (
-                  <tr
-                    key={row.strike_price}
-                    ref={isAtm ? atmRowRef : undefined}
-                    className={`border-b border-border/50 transition-colors ${
-                      isAtm ? "" : "hover:bg-secondary/40"
-                    }`}
-                    style={
-                      isAtm
-                        ? {
-                            background: "oklch(0.72 0.18 75 / 0.1)",
-                            borderColor: "oklch(0.72 0.18 75 / 0.3)",
-                          }
-                        : {}
-                    }
-                  >
-                    {/* biome-ignore lint/a11y/useKeyWithClickEvents: trading table cell */}
-                    <td
-                      className="py-1.5 px-2 text-right font-mono-data text-foreground cursor-pointer hover:text-primary transition-colors"
-                      onClick={() =>
-                        ceIk &&
-                        (ce.ltp ?? 0) > 0 &&
-                        setSidePanel({
-                          instrumentKey: ceIk,
-                          ltp: ce.ltp ?? 0,
-                          side: "CE",
-                          strikePrice: row.strike_price,
-                        })
-                      }
-                    >
-                      {(ce.ltp ?? 0) > 0 ? (ce.ltp ?? 0).toFixed(2) : "—"}
-                    </td>
-                    <td
-                      className="py-1.5 px-2 text-right font-mono-data"
-                      style={{ color: "oklch(0.64 0.2 145 / 0.7)" }}
-                    >
-                      {ce.oi ? `${(ce.oi / 1000).toFixed(1)}K` : "—"}
-                    </td>
-                    <td
-                      className="py-1.5 px-2 text-right font-mono-data"
-                      style={{ color: "oklch(0.64 0.2 145 / 0.7)" }}
-                    >
-                      {ce.volume ? `${(ce.volume / 1000).toFixed(1)}K` : "—"}
-                    </td>
-                    <td
-                      className="py-1.5 px-2 text-right font-mono-data border-r border-border"
-                      style={{ color: "oklch(0.64 0.2 145 / 0.5)" }}
-                    >
-                      {ce.iv?.toFixed(1) ?? "—"}
-                    </td>
-                    <td
-                      className={`py-1.5 px-3 text-center font-mono-data font-bold text-xs ${
-                        isAtm ? "text-atm" : "text-muted-foreground"
-                      }`}
-                    >
-                      {isAtm && (
-                        <span className="mr-1 text-atm text-[9px]">▶</span>
-                      )}
-                      {row.strike_price.toLocaleString("en-IN")}
-                    </td>
-                    {/* biome-ignore lint/a11y/useKeyWithClickEvents: trading table cell */}
-                    <td
-                      className="py-1.5 px-2 text-left font-mono-data text-foreground border-l border-border cursor-pointer hover:text-primary transition-colors"
-                      onClick={() =>
-                        peIk &&
-                        (pe.ltp ?? 0) > 0 &&
-                        setSidePanel({
-                          instrumentKey: peIk,
-                          ltp: pe.ltp ?? 0,
-                          side: "PE",
-                          strikePrice: row.strike_price,
-                        })
-                      }
-                    >
-                      {(pe.ltp ?? 0) > 0 ? (pe.ltp ?? 0).toFixed(2) : "—"}
-                    </td>
-                    <td
-                      className="py-1.5 px-2 text-left font-mono-data"
-                      style={{ color: "oklch(0.62 0.22 22 / 0.7)" }}
-                    >
-                      {pe.oi ? `${(pe.oi / 1000).toFixed(1)}K` : "—"}
-                    </td>
-                    <td
-                      className="py-1.5 px-2 text-left font-mono-data"
-                      style={{ color: "oklch(0.62 0.22 22 / 0.7)" }}
-                    >
-                      {pe.volume ? `${(pe.volume / 1000).toFixed(1)}K` : "—"}
-                    </td>
-                    <td
-                      className="py-1.5 px-2 text-left font-mono-data"
-                      style={{ color: "oklch(0.62 0.22 22 / 0.5)" }}
-                    >
-                      {pe.iv?.toFixed(1) ?? "—"}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          <div className="flex justify-center py-2 border-t border-border/50">
-            <button
-              data-ocid="option_chain.show_all_toggle"
-              type="button"
-              onClick={() => setShowAllStrikes((v) => !v)}
-              className="text-xs text-muted-foreground underline hover:text-foreground transition-colors"
+            {/* Expiry tabs — horizontally scrollable */}
+            <div
+              className="flex gap-1.5 overflow-x-auto pb-1 scrollbar-none"
+              data-ocid="options.expiry_tabs"
             >
-              {showAllStrikes
-                ? "Show ±10 strikes"
-                : `Show all ${chain.length} strikes`}
-            </button>
+              {loadingExpiry ? (
+                <span className="text-[10px] text-muted-foreground px-2 py-1">
+                  Loading expiries...
+                </span>
+              ) : (
+                expiryDates.map((d, i) => (
+                  <button
+                    key={d}
+                    type="button"
+                    ref={expiry === d ? selectedExpiryRef : undefined}
+                    data-ocid={`options.expiry_tab.${i + 1}`}
+                    onClick={() => setExpiry(d)}
+                    className={`shrink-0 px-3 py-1 rounded-full text-[10px] font-mono font-bold border transition-colors whitespace-nowrap ${
+                      expiry === d
+                        ? "bg-primary/20 text-primary border-primary/50"
+                        : "bg-secondary text-muted-foreground border-border hover:text-foreground"
+                    }`}
+                  >
+                    {d}
+                  </button>
+                ))
+              )}
+            </div>
           </div>
-        </div>
+
+          {/* Chain Table */}
+          {loading ? (
+            <div className="p-4 space-y-1.5">
+              {[1, 2, 3, 4, 5].map((i) => (
+                <div
+                  key={i}
+                  className="h-8 rounded bg-secondary animate-pulse"
+                />
+              ))}
+            </div>
+          ) : chain.length === 0 ? (
+            <div className="py-12 text-center">
+              <LineChart className="w-7 h-7 text-muted-foreground/30 mx-auto mb-2" />
+              <p className="text-xs text-muted-foreground">
+                {expiry
+                  ? "Loading option chain..."
+                  : "Select an index to load option chain"}
+              </p>
+            </div>
+          ) : (
+            <div className="overflow-auto flex-1" data-ocid="options.table">
+              <table className="w-full text-xs border-collapse min-w-[560px]">
+                <OptionChainHeader />
+                <tbody>
+                  {displayChain.map((row) => {
+                    const isAtm = atm?.strike_price === row.strike_price;
+                    const ce = row.call_options?.market_data ?? {};
+                    const pe = row.put_options?.market_data ?? {};
+                    const ceIk = row.call_options?.instrument_key;
+                    const peIk = row.put_options?.instrument_key;
+                    return (
+                      <tr
+                        key={row.strike_price}
+                        ref={isAtm ? atmRowRef : undefined}
+                        className={`border-b border-border/50 transition-colors ${
+                          isAtm ? "" : "hover:bg-secondary/40"
+                        }`}
+                        style={
+                          isAtm
+                            ? {
+                                background: "oklch(0.72 0.18 75 / 0.1)",
+                                borderColor: "oklch(0.72 0.18 75 / 0.3)",
+                              }
+                            : {}
+                        }
+                      >
+                        {/* biome-ignore lint/a11y/useKeyWithClickEvents: trading table cell */}
+                        <td
+                          className="py-1.5 px-2 text-right font-mono-data text-foreground cursor-pointer hover:text-primary transition-colors"
+                          onClick={() =>
+                            ceIk &&
+                            (ce.ltp ?? 0) > 0 &&
+                            setSidePanel({
+                              instrumentKey: ceIk,
+                              ltp: ce.ltp ?? 0,
+                              side: "CE",
+                              strikePrice: row.strike_price,
+                            })
+                          }
+                        >
+                          {(ce.ltp ?? 0) > 0 ? (ce.ltp ?? 0).toFixed(2) : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-2 text-right font-mono-data"
+                          style={{ color: "oklch(0.64 0.2 145 / 0.7)" }}
+                        >
+                          {ce.oi ? `${(ce.oi / 1000).toFixed(1)}K` : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-2 text-right font-mono-data"
+                          style={{ color: "oklch(0.64 0.2 145 / 0.7)" }}
+                        >
+                          {ce.volume
+                            ? `${(ce.volume / 1000).toFixed(1)}K`
+                            : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-2 text-right font-mono-data border-r border-border"
+                          style={{ color: "oklch(0.64 0.2 145 / 0.5)" }}
+                        >
+                          {ceIk && greeksData[ceIk]?.iv != null
+                            ? greeksData[ceIk]!.iv!.toFixed(1)
+                            : "—"}
+                        </td>
+                        {(["delta", "gamma", "theta", "vega"] as const).map(
+                          (k) => (
+                            <td
+                              key={`ce-${k}`}
+                              className="py-1.5 px-1 text-right font-mono-data text-[9px]"
+                              style={{ color: "oklch(0.64 0.2 145 / 0.5)" }}
+                            >
+                              {ceIk && greeksData[ceIk]?.[k] != null
+                                ? (greeksData[ceIk][k] as number).toFixed(4)
+                                : "—"}
+                            </td>
+                          ),
+                        )}
+                        <td
+                          className={`py-1.5 px-3 text-center font-mono-data font-bold text-xs ${
+                            isAtm ? "text-atm" : "text-muted-foreground"
+                          }`}
+                        >
+                          {isAtm && (
+                            <span className="mr-1 text-atm text-[9px]">▶</span>
+                          )}
+                          {row.strike_price.toLocaleString("en-IN")}
+                        </td>
+                        {/* biome-ignore lint/a11y/useKeyWithClickEvents: trading table cell */}
+                        <td
+                          className="py-1.5 px-2 text-left font-mono-data text-foreground border-l border-border cursor-pointer hover:text-primary transition-colors"
+                          onClick={() =>
+                            peIk &&
+                            (pe.ltp ?? 0) > 0 &&
+                            setSidePanel({
+                              instrumentKey: peIk,
+                              ltp: pe.ltp ?? 0,
+                              side: "PE",
+                              strikePrice: row.strike_price,
+                            })
+                          }
+                        >
+                          {(pe.ltp ?? 0) > 0 ? (pe.ltp ?? 0).toFixed(2) : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-2 text-left font-mono-data"
+                          style={{ color: "oklch(0.62 0.22 22 / 0.7)" }}
+                        >
+                          {pe.oi ? `${(pe.oi / 1000).toFixed(1)}K` : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-2 text-left font-mono-data"
+                          style={{ color: "oklch(0.62 0.22 22 / 0.7)" }}
+                        >
+                          {pe.volume
+                            ? `${(pe.volume / 1000).toFixed(1)}K`
+                            : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-2 text-left font-mono-data"
+                          style={{ color: "oklch(0.62 0.22 22 / 0.5)" }}
+                        >
+                          {peIk && greeksData[peIk]?.iv != null
+                            ? greeksData[peIk]!.iv!.toFixed(1)
+                            : "—"}
+                        </td>
+                        {(["vega", "theta", "gamma", "delta"] as const).map(
+                          (k) => (
+                            <td
+                              key={`pe-${k}`}
+                              className="py-1.5 px-1 text-left font-mono-data text-[9px]"
+                              style={{ color: "oklch(0.62 0.22 22 / 0.5)" }}
+                            >
+                              {peIk && greeksData[peIk]?.[k] != null
+                                ? (greeksData[peIk][k] as number).toFixed(4)
+                                : "—"}
+                            </td>
+                          ),
+                        )}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <div className="flex justify-center py-2 border-t border-border/50">
+                <button
+                  data-ocid="option_chain.show_all_toggle"
+                  type="button"
+                  onClick={() => setShowAllStrikes((v) => !v)}
+                  className="text-xs text-muted-foreground underline hover:text-foreground transition-colors"
+                >
+                  {showAllStrikes
+                    ? "Show ±10 strikes"
+                    : `Show all ${chain.length} strikes`}
+                </button>
+              </div>
+            </div>
+          )}
+        </>
       )}
       {sidePanel && (
         <LtpSidePanel
@@ -4788,6 +5993,7 @@ function DashboardScreen({
     txType?: "BUY" | "SELL";
     price?: string;
     quantity?: string;
+    lotSize?: number;
   } | null>(null);
 
   const handleBuyStrike = (
@@ -4800,6 +6006,7 @@ function DashboardScreen({
       txType,
       price: ltp.toFixed(2),
       quantity: "1",
+      lotSize: getLotSize(optionUnderlying),
     });
     setActiveTab("orders");
   };
@@ -4956,6 +6163,7 @@ function DashboardScreen({
                 initialUnderlying={optionUnderlying}
                 tradeSettings={tradeSettings}
                 onBuyStrike={handleBuyStrike}
+                onUnderlyingChange={setOptionUnderlying}
               />
             )}
             {activeTab === "market" && <LiveTab token={token} />}
