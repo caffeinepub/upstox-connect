@@ -172,11 +172,11 @@ const KEYS = {
 
 // ─── Index Lot Sizes ─────────────────────────────────────────────────────────
 const INDEX_LOT_SIZES: Record<string, number> = {
-  "NSE_INDEX|Nifty 50": 75,
+  "NSE_INDEX|Nifty 50": 65,
   "NSE_INDEX|Nifty Bank": 30,
   "NSE_INDEX|FINNIFTY": 65,
   "NSE_INDEX|MIDCPNIFTY": 120,
-  "BSE_INDEX|SENSEX": 10,
+  "BSE_INDEX|SENSEX": 20,
 };
 
 function getLotSize(instrumentKey: string): number {
@@ -185,8 +185,8 @@ function getLotSize(instrumentKey: string): number {
   if (key.includes("NIFTY BANK") || key.includes("BANKNIFTY")) return 30;
   if (key.includes("FINNIFTY")) return 65;
   if (key.includes("MIDCPNIFTY") || key.includes("MIDCAP")) return 120;
-  if (key.includes("SENSEX")) return 10;
-  if (key.includes("NIFTY")) return 75;
+  if (key.includes("SENSEX")) return 20;
+  if (key.includes("NIFTY")) return 65;
   return 1;
 }
 
@@ -270,6 +270,7 @@ interface Holding {
 
 interface OptionData {
   strike_price: number;
+  lot_size?: number;
   call_options?: {
     instrument_key?: string;
     market_data?: { ltp?: number; oi?: number; volume?: number; iv?: number };
@@ -1351,6 +1352,7 @@ function OrdersTab({
   const [gttEditId, setGttEditId] = useState<string | null>(null);
   const [gttPlacing, setGttPlacing] = useState(false);
   const [prefillLotSize, setPrefillLotSize] = useState<number | null>(null);
+  const [editableLotSize, setEditableLotSize] = useState<string>("");
 
   // ── Regular order fetching ──
   const fetchOrders = useCallback(async () => {
@@ -1453,8 +1455,13 @@ function OrdersTab({
         setOrderType("LIMIT");
       }
       if (prefill.quantity) setQuantity(prefill.quantity);
-      if (prefill.lotSize) setPrefillLotSize(prefill.lotSize);
-      else setPrefillLotSize(null);
+      if (prefill.lotSize) {
+        setPrefillLotSize(prefill.lotSize);
+        setEditableLotSize(String(prefill.lotSize));
+      } else {
+        setPrefillLotSize(null);
+        setEditableLotSize("");
+      }
       onPrefillConsumed?.();
     }
   }, [prefill]);
@@ -1574,10 +1581,36 @@ function OrdersTab({
       return;
     }
     setPlacing(true);
-    const lotSize = prefillLotSize ?? getLotSize(instrumentKey);
+    // Fetch real lot_size from Upstox market quotes API (authoritative source)
+    const parsedEditableLotSize = Number.parseInt(editableLotSize || "0");
+    let lotSize =
+      parsedEditableLotSize > 0
+        ? parsedEditableLotSize
+        : (prefillLotSize ?? getLotSize(instrumentKey));
+    try {
+      const qRes = await fetch(
+        `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${encodeURIComponent(instrumentKey.trim())}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: "application/json",
+          },
+        },
+      );
+      if (qRes.ok) {
+        const qJson = await qRes.json();
+        const contractData = qJson?.data?.[instrumentKey.trim()];
+        if (contractData?.lot_size && Number(contractData.lot_size) > 0) {
+          lotSize = Number(contractData.lot_size);
+        }
+      }
+    } catch (_) {
+      /* use fallback lotSize */
+    }
+    const lotsEntered = Number.parseInt(quantity || "1");
     const rawQty =
       qtyMode === "LOTS"
-        ? Number.parseInt(quantity || "1") * lotSize
+        ? lotsEntered * lotSize
         : Number.parseInt(quantity, 10);
     // Ensure quantity is a multiple of lot size
     const actualQty = Math.round(rawQty / lotSize) * lotSize;
@@ -1636,13 +1669,13 @@ function OrdersTab({
           );
         }
       } else {
-        // Debug info: show exactly what is being sent
         toast.info(
-          `Placing: ${instrumentKey} | qty: ${actualQty} | lotSize: ${lotSize}`,
-          { duration: 2000 },
+          `Placing: ${instrumentKey} | qty: ${actualQty} | lotSize: ${lotSize} | edit: ${editableLotSize || "auto"}`,
+          { duration: 3000 },
         );
         const body: any = {
           instrument_key: instrumentKey.trim(),
+          instrument_token: instrumentKey.trim(),
           transaction_type: txType,
           order_type: orderType,
           product,
@@ -1653,7 +1686,6 @@ function OrdersTab({
           disclosed_quantity: 0,
           validity,
           is_amo: false,
-          tag: "upstox-connect",
         };
         const res = await fetch("https://api.upstox.com/v2/order/place", {
           method: "POST",
@@ -1669,13 +1701,8 @@ function OrdersTab({
           toast.success(`Order placed! ID: ${json?.data?.order_id ?? "—"}`);
           fetchOrders();
         } else {
-          const errMsg =
-            json?.errors?.[0]?.message ||
-            json?.errors?.[0]?.reason ||
-            json?.message ||
-            json?.error ||
-            `HTTP ${res.status}: ${JSON.stringify(json).slice(0, 200)}`;
-          toast.error(`Order failed: ${errMsg}`);
+          const errMsg = `HTTP ${res.status}: ${JSON.stringify(json)}`;
+          toast.error(`Order failed: ${errMsg}`, { duration: 8000 });
         }
       }
     } catch (e: any) {
@@ -2107,28 +2134,42 @@ function OrdersTab({
                       +
                     </button>
                   </div>
-                  {qtyMode === "LOTS" ? (
-                    <p className="text-[9px] text-muted-foreground mt-0.5">
-                      1 lot = {getLotSize(instrumentKey)} · actual:{" "}
-                      {Number.parseInt(quantity || "1") *
-                        getLotSize(instrumentKey)}
-                    </p>
-                  ) : (
-                    (() => {
-                      const ls = getLotSize(instrumentKey);
-                      const raw = Number.parseInt(quantity || "0");
-                      const rounded = Math.round(raw / ls) * ls;
-                      return raw > 0 && raw !== rounded ? (
-                        <p className="text-[9px] text-yellow-500 mt-0.5">
-                          Will round to {rounded} (lot size: {ls})
-                        </p>
-                      ) : raw > 0 ? (
-                        <p className="text-[9px] text-muted-foreground mt-0.5">
-                          Lot size: {ls}
-                        </p>
-                      ) : null;
-                    })()
-                  )}
+                  {(() => {
+                    const effectiveLotSize =
+                      Number.parseInt(editableLotSize || "0") > 0
+                        ? Number.parseInt(editableLotSize)
+                        : (prefillLotSize ?? getLotSize(instrumentKey));
+                    const actualQtyPreview =
+                      qtyMode === "LOTS"
+                        ? Number.parseInt(quantity || "1") * effectiveLotSize
+                        : Number.parseInt(quantity || "0");
+                    return (
+                      <div className="flex items-center gap-1 mt-1">
+                        <span className="text-[9px] text-muted-foreground">
+                          Lot Size:
+                        </span>
+                        <input
+                          data-ocid="orders.lot_size_input"
+                          type="number"
+                          value={
+                            editableLotSize !== ""
+                              ? editableLotSize
+                              : String(effectiveLotSize)
+                          }
+                          onChange={(e) => setEditableLotSize(e.target.value)}
+                          className="w-14 h-5 bg-secondary border border-amber-500 text-foreground text-[9px] rounded px-1 text-center font-mono"
+                          title="Edit lot size if order fails with quantity error"
+                        />
+                        <span className="text-[9px] text-muted-foreground">
+                          {qtyMode === "LOTS" ? (
+                            <> = {actualQtyPreview} units</>
+                          ) : (
+                            <>lots OK</>
+                          )}
+                        </span>
+                      </div>
+                    );
+                  })()}
                 </div>
                 <div>
                   <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
@@ -4139,9 +4180,10 @@ interface LtpSidePanelProps {
   side: "CE" | "PE";
   strikePrice: number;
   token: string;
+  lotSize: number;
   onClose: () => void;
-  onBuy: (instrumentKey: string, ltp: number) => void;
-  onSell: (instrumentKey: string, ltp: number) => void;
+  onBuy: (instrumentKey: string, ltp: number, lotSize: number) => void;
+  onSell: (instrumentKey: string, ltp: number, lotSize: number) => void;
 }
 
 // ─── LTP Side Panel Sub-components (memoized to avoid full re-render every second) ─
@@ -4309,6 +4351,7 @@ function LtpSidePanel({
   side,
   strikePrice,
   token,
+  lotSize,
   onClose,
   onBuy,
   onSell,
@@ -4571,7 +4614,7 @@ function LtpSidePanel({
             data-ocid="ltp_panel.buy_button"
             type="button"
             onClick={() => {
-              onBuy(instrumentKey, liveLtp);
+              onBuy(instrumentKey, liveLtp, lotSize);
               onClose();
             }}
             className="flex-1 py-2.5 rounded font-bold text-sm text-white transition-opacity hover:opacity-90"
@@ -4583,7 +4626,7 @@ function LtpSidePanel({
             data-ocid="ltp_panel.sell_button"
             type="button"
             onClick={() => {
-              onSell(instrumentKey, liveLtp);
+              onSell(instrumentKey, liveLtp, lotSize);
               onClose();
             }}
             className="flex-1 py-2.5 rounded font-bold text-sm text-white transition-opacity hover:opacity-90"
@@ -4828,6 +4871,7 @@ function OptionChainTab({
     instrumentKey: string,
     ltp: number,
     txType: "BUY" | "SELL",
+    lotSize: number,
   ) => void;
   onUnderlyingChange?: (underlying: string) => void;
 }) {
@@ -4960,6 +5004,7 @@ function OptionChainTab({
     ltp: number;
     side: "CE" | "PE";
     strikePrice: number;
+    lotSize: number;
   } | null>(null);
   const displayChain = showAllStrikes
     ? chain
@@ -5196,6 +5241,7 @@ function OptionChainTab({
                               ltp: ce.ltp ?? 0,
                               side: "CE",
                               strikePrice: row.strike_price,
+                              lotSize: row.lot_size ?? getLotSize(underlying),
                             })
                           }
                         >
@@ -5257,6 +5303,7 @@ function OptionChainTab({
                               ltp: pe.ltp ?? 0,
                               side: "PE",
                               strikePrice: row.strike_price,
+                              lotSize: row.lot_size ?? getLotSize(underlying),
                             })
                           }
                         >
@@ -5326,12 +5373,13 @@ function OptionChainTab({
           strikePrice={sidePanel.strikePrice}
           token={token}
           onClose={() => setSidePanel(null)}
-          onBuy={(ik, ltpVal) => {
-            onBuyStrike?.(ik, ltpVal, "BUY");
+          lotSize={sidePanel.lotSize}
+          onBuy={(ik, ltpVal, ls) => {
+            onBuyStrike?.(ik, ltpVal, "BUY", ls);
             setSidePanel(null);
           }}
-          onSell={(ik, ltpVal) => {
-            onBuyStrike?.(ik, ltpVal, "SELL");
+          onSell={(ik, ltpVal, ls) => {
+            onBuyStrike?.(ik, ltpVal, "SELL", ls);
             setSidePanel(null);
           }}
         />
@@ -6000,13 +6048,14 @@ function DashboardScreen({
     instrumentKey: string,
     ltp: number,
     txType: "BUY" | "SELL",
+    lotSize: number,
   ) => {
     setOrderPrefill({
       instrumentKey,
       txType,
       price: ltp.toFixed(2),
       quantity: "1",
-      lotSize: getLotSize(optionUnderlying),
+      lotSize,
     });
     setActiveTab("orders");
   };
