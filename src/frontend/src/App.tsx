@@ -32,6 +32,7 @@ import {
   AlertTriangle,
   BarChart2,
   BookOpen,
+  Brain,
   BriefcaseBusiness,
   CheckCircle,
   ChevronDown,
@@ -3603,22 +3604,31 @@ function PositionsTab({
     return pos;
   };
 
+  const isInitialPositionsLoad = useRef(true);
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: fixAvgPrice is stable
-  const fetchPositions = useCallback(async () => {
-    setLoading(true);
-    const res = await upstoxFetch<Position[]>(
-      "/v2/portfolio/short-term-positions",
-      token,
-    );
-    if (res.data)
-      setPositions((Array.isArray(res.data) ? res.data : []).map(fixAvgPrice));
-    else if (res.error) toast.error(`Positions: ${res.error}`);
-    setLoading(false);
-  }, [token]);
+  const fetchPositions = useCallback(
+    async (silent = false) => {
+      if (!silent) setLoading(true);
+      const res = await upstoxFetch<Position[]>(
+        "/v2/portfolio/short-term-positions",
+        token,
+      );
+      if (res.data)
+        setPositions(
+          (Array.isArray(res.data) ? res.data : []).map(fixAvgPrice),
+        );
+      else if (res.error && !silent) toast.error(`Positions: ${res.error}`);
+      if (!silent) setLoading(false);
+    },
+    [token],
+  );
 
   useEffect(() => {
-    fetchPositions();
-    const id = setInterval(fetchPositions, 1000);
+    isInitialPositionsLoad.current = true;
+    fetchPositions(false);
+    isInitialPositionsLoad.current = false;
+    const id = setInterval(() => fetchPositions(true), 1000);
     return () => clearInterval(id);
   }, [fetchPositions]);
 
@@ -3650,7 +3660,7 @@ function PositionsTab({
         <button
           data-ocid="positions.refresh.button"
           type="button"
-          onClick={fetchPositions}
+          onClick={() => fetchPositions(false)}
           className="w-7 h-7 flex items-center justify-center rounded border border-border text-muted-foreground hover:text-foreground transition-colors"
         >
           <RefreshCw
@@ -3858,20 +3868,23 @@ function HoldingsTab({
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const fetchHoldings = useCallback(async () => {
-    setLoading(true);
-    const res = await upstoxFetch<Holding[]>(
-      "/v2/portfolio/long-term-holdings",
-      token,
-    );
-    if (res.data) setHoldings(Array.isArray(res.data) ? res.data : []);
-    else if (res.error) toast.error(`Holdings: ${res.error}`);
-    setLoading(false);
-  }, [token]);
+  const fetchHoldings = useCallback(
+    async (silent = false) => {
+      if (!silent) setLoading(true);
+      const res = await upstoxFetch<Holding[]>(
+        "/v2/portfolio/long-term-holdings",
+        token,
+      );
+      if (res.data) setHoldings(Array.isArray(res.data) ? res.data : []);
+      else if (res.error && !silent) toast.error(`Holdings: ${res.error}`);
+      if (!silent) setLoading(false);
+    },
+    [token],
+  );
 
   useEffect(() => {
-    fetchHoldings();
-    const id = setInterval(fetchHoldings, 1000);
+    fetchHoldings(false);
+    const id = setInterval(() => fetchHoldings(true), 1000);
     return () => clearInterval(id);
   }, [fetchHoldings]);
 
@@ -3932,7 +3945,7 @@ function HoldingsTab({
         <button
           data-ocid="holdings.refresh.button"
           type="button"
-          onClick={fetchHoldings}
+          onClick={() => fetchHoldings(false)}
           className="w-7 h-7 flex items-center justify-center rounded border border-border text-muted-foreground hover:text-foreground transition-colors"
         >
           <RefreshCw
@@ -4205,7 +4218,7 @@ function RiskTab({ token }: { token: string }) {
           <button
             data-ocid="risk.refresh.button"
             type="button"
-            onClick={fetchPositions}
+            onClick={() => fetchPositions()}
             className="w-7 h-7 flex items-center justify-center rounded border border-border text-muted-foreground hover:text-foreground transition-colors"
           >
             <RefreshCw
@@ -6365,12 +6378,12 @@ function OptionChainTab({
     fetchExpiryDates(underlying);
   }, [underlying, fetchExpiryDates]);
 
-  const fetchChain = async () => {
+  const fetchChain = async (silent = false) => {
     if (!expiry) {
-      toast.error("Select expiry date");
+      if (!silent) toast.error("Select expiry date");
       return;
     }
-    setLoading(true);
+    if (!silent) setLoading(true);
     const res = await upstoxFetch<OptionData[]>(
       `/v2/option/chain?instrument_key=${encodeURIComponent(underlying)}&expiry_date=${expiry}`,
       token,
@@ -6381,9 +6394,9 @@ function OptionChainTab({
         arr.sort((a, b) => (a.strike_price ?? 0) - (b.strike_price ?? 0)),
       );
     } else {
-      toast.error(`Option chain: ${res.error}`);
+      if (!silent) toast.error(`Option chain: ${res.error}`);
     }
-    setLoading(false);
+    if (!silent) setLoading(false);
   };
 
   // Auto-fetch chain when expiry changes
@@ -6399,7 +6412,7 @@ function OptionChainTab({
   useEffect(() => {
     if (!expiry) return;
     const id = setInterval(() => {
-      fetchChain();
+      fetchChain(true);
     }, 1000);
     return () => clearInterval(id);
   }, [expiry]);
@@ -6515,54 +6528,70 @@ function OptionChainTab({
   }, [expiry, displayChain, underlyingLtp]);
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Trend Analysis Panel */}
-      <TrendAnalysisPanel
-        chain={chain}
-        underlyingLtp={underlyingLtp}
-        expiries={expiryDates}
-        selectedExpiry={expiry}
-        tradeSettings={tradeSettings}
-        greeksData={greeksData}
-        expanded={aiPanelExpanded}
-        onToggleExpanded={() => setAiPanelExpanded((v) => !v)}
-        onSignalReady={handleSignalReady}
-      />
-      {/* Signal Monitor Panel */}
-      <SignalMonitorPanel
-        signals={signals}
-        expanded={signalMonitorExpanded}
-        onToggleExpanded={() => setSignalMonitorExpanded((v) => !v)}
-        onClear={() => {
-          localStorage.removeItem("upstox_signals_v1");
-          setSignals([]);
-        }}
-        chain={chain}
-      />
-      {/* Option Chain Header with toggle */}
+    <div className="flex flex-col h-full overflow-hidden">
+      {/* AI Analysis Panel - independent, collapsible */}
+      {aiPanelExpanded && (
+        <div className="border-b border-border overflow-y-auto max-h-[45vh] shrink-0">
+          <TrendAnalysisPanel
+            chain={chain}
+            underlyingLtp={underlyingLtp}
+            expiries={expiryDates}
+            selectedExpiry={expiry}
+            tradeSettings={tradeSettings}
+            greeksData={greeksData}
+            expanded={true}
+            onToggleExpanded={() => setAiPanelExpanded((v) => !v)}
+            onSignalReady={handleSignalReady}
+          />
+          <SignalMonitorPanel
+            signals={signals}
+            expanded={signalMonitorExpanded}
+            onToggleExpanded={() => setSignalMonitorExpanded((v) => !v)}
+            onClear={() => {
+              localStorage.removeItem("upstox_signals_v1");
+              setSignals([]);
+            }}
+            chain={chain}
+          />
+        </div>
+      )}
+      {/* Panel controls bar */}
       <div
-        className="flex items-center justify-between px-3 py-1.5 border-b border-border"
+        className="flex items-center justify-between px-3 py-1.5 border-b border-border shrink-0"
         style={{ background: "oklch(var(--card))" }}
       >
+        <button
+          type="button"
+          data-ocid="options.ai_panel.toggle"
+          onClick={() => setAiPanelExpanded((v) => !v)}
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-colors border ${
+            aiPanelExpanded
+              ? "bg-primary/20 text-primary border-primary/40"
+              : "bg-secondary text-muted-foreground border-border hover:text-foreground"
+          }`}
+        >
+          <Brain className="w-3 h-3" />
+          {aiPanelExpanded ? "Hide AI Analysis ▲" : "Show AI Analysis ▼"}
+        </button>
         <div className="flex items-center gap-2">
           <LineChart className="w-3.5 h-3.5 text-primary" />
           <span className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
             Option Chain
           </span>
+          <button
+            type="button"
+            data-ocid="options.chain_panel.toggle"
+            className="p-0.5 rounded hover:bg-secondary/60 transition-colors text-muted-foreground hover:text-foreground"
+            onClick={() => setChainPanelExpanded((v) => !v)}
+            aria-label={
+              chainPanelExpanded ? "Minimize chain panel" : "Expand chain panel"
+            }
+          >
+            <ChevronDown
+              className={`w-4 h-4 transition-transform duration-200${chainPanelExpanded ? "" : " -rotate-90"}`}
+            />
+          </button>
         </div>
-        <button
-          type="button"
-          data-ocid="options.chain_panel.toggle"
-          className="p-0.5 rounded hover:bg-secondary/60 transition-colors text-muted-foreground hover:text-foreground"
-          onClick={() => setChainPanelExpanded((v) => !v)}
-          aria-label={
-            chainPanelExpanded ? "Minimize chain panel" : "Expand chain panel"
-          }
-        >
-          <ChevronDown
-            className={`w-4 h-4 transition-transform duration-200${chainPanelExpanded ? "" : " -rotate-90"}`}
-          />
-        </button>
       </div>
       {chainPanelExpanded && (
         <>

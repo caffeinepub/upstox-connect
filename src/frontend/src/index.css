@@ -133,6 +133,7 @@
   body {
     @apply bg-background text-foreground font-body;
     font-size: 16px;
+    font-weight: 700;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     overscroll-behavior-y: contain;
@@ -141,6 +142,34 @@
   textarea,
   select {
     font-size: 16px !important;
+    font-weight: 700;
+  }
+  /* Ensure all text elements are bold by default */
+  p,
+  span,
+  div,
+  td,
+  th,
+  li,
+  label,
+  button,
+  a {
+    font-weight: inherit;
+  }
+  /* Small text gets extra boldness since it's harder to read */
+  .text-xs {
+    font-weight: 800 !important;
+  }
+  .text-sm {
+    font-weight: 700 !important;
+  }
+  /* Table headers always bold */
+  th {
+    font-weight: 800 !important;
+  }
+  /* Muted text - boost weight for readability */
+  .text-muted-foreground {
+    font-weight: 700 !important;
   }
 }
 
@@ -149,6 +178,7 @@
     font-family: "JetBrains Mono", monospace;
     font-feature-settings: "tnum" 1;
     font-variant-numeric: tabular-nums;
+    font-weight: 600;
   }
   .text-gain {
     color: oklch(var(--gain));
