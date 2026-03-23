@@ -1,3 +1,13 @@
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -25,6 +35,8 @@ import {
   BriefcaseBusiness,
   CheckCircle,
   ChevronDown,
+  ChevronRight,
+  ChevronUp,
   Copy,
   Eye,
   EyeOff,
@@ -47,7 +59,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import React, { memo, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 // ─── Black-Scholes Functions ──────────────────────────────────────────────────
@@ -254,6 +266,7 @@ interface Position {
 }
 
 interface Holding {
+  instrument_token?: string;
   tradingsymbol: string;
   exchange: string;
   isin: string;
@@ -635,6 +648,23 @@ interface AccountEntry {
   apiSecret: string;
   redirectUri: string;
   token: string;
+}
+
+interface GeneratedSignal {
+  id: string;
+  timestamp: number;
+  date: string;
+  instrument: string;
+  strike: number;
+  action: "BUY CALL" | "BUY PUT";
+  expiry: string;
+  entryPrice: number;
+  sl: number;
+  tgt1: number;
+  tgt2: number;
+  ceInstrumentKey?: string;
+  peInstrumentKey?: string;
+  status: "ACTIVE" | "TARGET1_HIT" | "TARGET2_HIT" | "SL_HIT" | "EXPIRED";
 }
 
 const DEFAULT_TRADE_SETTINGS: TradeSettings = {
@@ -1319,6 +1349,12 @@ function OrdersTab({
   const [validity, setValidity] = useState("DAY");
   const [placing, setPlacing] = useState(false);
   const [editingOrderId, setEditingOrderId] = useState<string | null>(null);
+  const [showOrderForm, setShowOrderForm] = useState(false);
+  const [showGttForm, setShowGttForm] = useState(false);
+  const [cancelConfirm, setCancelConfirm] = useState<{
+    orderId: string;
+    type: "regular" | "gtt";
+  } | null>(null);
   const [orderFormDepth, setOrderFormDepth] = useState<{
     bids: Array<{ price: number; quantity: number }>;
     asks: Array<{ price: number; quantity: number }>;
@@ -1337,11 +1373,21 @@ function OrdersTab({
   // ── GTT state ──
   const [gttOrders, setGttOrders] = useState<any[]>([]);
   const [gttLoading, setGttLoading] = useState(false);
-  const [gttType, setGttType] = useState<"SINGLE" | "MULTIPLE">("SINGLE");
+  const [gttStatusFilter, setGttStatusFilter] = useState<
+    "ALL" | "OPEN" | "TRIGGERED" | "CANCELLED"
+  >("ALL");
+  const [gttType, setGttType] = useState<"SINGLE" | "MULTIPLE">("MULTIPLE");
   const [gttInstrumentToken, setGttInstrumentToken] = useState("");
   const [gttTxType, setGttTxType] = useState<"BUY" | "SELL">("BUY");
   const [gttProduct, setGttProduct] = useState("D");
   const [gttQty, setGttQty] = useState("1");
+  const [gttQtyMode, setGttQtyMode] = useState<"LOTS" | "QTY">("LOTS");
+  const [gttLotSize, setGttLotSize] = useState<string>("");
+  const [gttDepth, setGttDepth] = useState<{
+    bids: MarketDepthEntry[];
+    asks: MarketDepthEntry[];
+  } | null>(null);
+  const [gttDepthLoading, setGttDepthLoading] = useState(false);
   const [gttEntryPrice, setGttEntryPrice] = useState("");
   const [gttEntryTriggerType, setGttEntryTriggerType] = useState<
     "ABOVE" | "BELOW"
@@ -1351,7 +1397,17 @@ function OrdersTab({
   const [gttTrailingGap, setGttTrailingGap] = useState("");
   const [gttEditId, setGttEditId] = useState<string | null>(null);
   const [gttPlacing, setGttPlacing] = useState(false);
+  const [gttRowDepthOpen, setGttRowDepthOpen] = useState<Set<string>>(
+    new Set(),
+  );
+  const [gttRowDepthData, setGttRowDepthData] = useState<
+    Record<
+      string,
+      { bids: MarketDepthEntry[]; asks: MarketDepthEntry[] } | null
+    >
+  >({});
   const [prefillLotSize, setPrefillLotSize] = useState<number | null>(null);
+  const [prefillPrice, setPrefillPrice] = useState("");
   const [editableLotSize, setEditableLotSize] = useState<string>("");
 
   // ── Regular order fetching ──
@@ -1365,8 +1421,6 @@ function OrdersTab({
 
   useEffect(() => {
     fetchOrders();
-    const id = setInterval(fetchOrders, 1000);
-    return () => clearInterval(id);
   }, [fetchOrders]);
 
   // ── Market depth for order form ──
@@ -1448,19 +1502,38 @@ function OrdersTab({
   // biome-ignore lint/correctness/useExhaustiveDependencies: prefill is intentional one-shot
   useEffect(() => {
     if (prefill) {
-      if (prefill.instrumentKey) setInstrumentKey(prefill.instrumentKey);
-      if (prefill.txType) setTxType(prefill.txType);
-      if (prefill.price) {
-        setPrice(prefill.price);
-        setOrderType("LIMIT");
-      }
-      if (prefill.quantity) setQuantity(prefill.quantity);
-      if (prefill.lotSize) {
-        setPrefillLotSize(prefill.lotSize);
-        setEditableLotSize(String(prefill.lotSize));
+      // @ts-ignore
+      const isGttMode = !!(prefill as any).gttMode;
+      if (isGttMode) {
+        // Switch to GTT sub-tab and prefill GTT form
+        setOrderSubTab("gtt");
+        setShowGttForm(true);
+        if (prefill.instrumentKey) setGttInstrumentToken(prefill.instrumentKey);
+        if (prefill.txType) setGttTxType(prefill.txType as "BUY" | "SELL");
+        if (prefill.price) setGttEntryPrice(prefill.price);
+        if (prefill.quantity) setGttQty(prefill.quantity);
+        if (prefill.lotSize) setGttLotSize(String(prefill.lotSize));
       } else {
-        setPrefillLotSize(null);
-        setEditableLotSize("");
+        setShowOrderForm(true);
+        if (prefill.instrumentKey) {
+          setInstrumentKey(prefill.instrumentKey);
+          // Also sync to GTT instrument token so switching tabs carries the key
+          setGttInstrumentToken(prefill.instrumentKey);
+        }
+        if (prefill.txType) setTxType(prefill.txType);
+        if (prefill.price) {
+          setPrice(prefill.price);
+          setPrefillPrice(prefill.price);
+          setOrderType("LIMIT");
+        }
+        if (prefill.quantity) setQuantity(prefill.quantity);
+        if (prefill.lotSize) {
+          setPrefillLotSize(prefill.lotSize);
+          setEditableLotSize(String(prefill.lotSize));
+        } else {
+          setPrefillLotSize(null);
+          setEditableLotSize("");
+        }
       }
       onPrefillConsumed?.();
     }
@@ -1513,7 +1586,8 @@ function OrdersTab({
           setRequiredMargin(res.data[0].required_margin);
           setIsEstimatedMargin(false);
         } else {
-          const ltpFallback = Number.parseFloat(price) || 0;
+          const ltpFallback =
+            Number.parseFloat(price) || Number.parseFloat(prefillPrice) || 0;
           const actualQtyFallback =
             qtyMode === "LOTS"
               ? Number.parseInt(quantity || "1") * getLotSize(instrumentKey)
@@ -1524,7 +1598,8 @@ function OrdersTab({
           }
         }
       } catch {
-        const ltpFallback = Number.parseFloat(price) || 0;
+        const ltpFallback =
+          Number.parseFloat(price) || Number.parseFloat(prefillPrice) || 0;
         const actualQtyFallback =
           qtyMode === "LOTS"
             ? Number.parseInt(quantity || "1") * getLotSize(instrumentKey)
@@ -1545,6 +1620,7 @@ function OrdersTab({
     product,
     quantity,
     price,
+    prefillPrice,
     qtyMode,
   ]);
 
@@ -1570,8 +1646,6 @@ function OrdersTab({
   useEffect(() => {
     if (orderSubTab !== "gtt") return;
     fetchGTTOrders();
-    const id = setInterval(fetchGTTOrders, 5000);
-    return () => clearInterval(id);
   }, [orderSubTab, fetchGTTOrders]);
 
   // ── Place / modify regular order (v2 API) ──
@@ -1699,6 +1773,7 @@ function OrdersTab({
         const json = await res.json();
         if (res.ok) {
           toast.success(`Order placed! ID: ${json?.data?.order_id ?? "—"}`);
+          setShowOrderForm(false);
           fetchOrders();
         } else {
           const errMsg = `HTTP ${res.status}: ${JSON.stringify(json)}`;
@@ -1762,14 +1837,76 @@ function OrdersTab({
     setGttSlPrice("");
     setGttTrailingGap("");
     setGttQty("1");
+    setGttQtyMode("LOTS");
+    setGttLotSize("");
+    setGttDepth(null);
     setGttEditId(null);
+    setShowGttForm(false);
   };
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: interval-based depth fetch
+  useEffect(() => {
+    if (!gttInstrumentToken.trim() || orderSubTab !== "gtt") return;
+    if (!token) return;
+
+    let cancelled = false;
+    const fetchGttDepth = async () => {
+      try {
+        setGttDepthLoading(true);
+        const encoded = encodeURIComponent(gttInstrumentToken);
+        const res = await fetch(
+          `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${encoded}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          },
+        );
+        if (!res.ok) return;
+        const d = await res.json();
+        const key = Object.keys(d?.data ?? {})[0];
+        const depthData = d?.data?.[key]?.depth;
+        if (depthData && !cancelled) {
+          const bids = (depthData.buy || []).slice(0, 5).map((b: any) => ({
+            price: b.price,
+            quantity: b.quantity,
+            orders: b.orders,
+          }));
+          const asks = (depthData.sell || []).slice(0, 5).map((a: any) => ({
+            price: a.price,
+            quantity: a.quantity,
+            orders: a.orders,
+          }));
+          setGttDepth({ bids, asks });
+        }
+      } catch {
+      } finally {
+        if (!cancelled) setGttDepthLoading(false);
+      }
+    };
+    fetchGttDepth();
+    const id = setInterval(fetchGttDepth, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [gttInstrumentToken, orderSubTab, token]);
 
   const submitGTTOrder = async () => {
     if (!gttInstrumentToken.trim() || !gttEntryPrice) {
       toast.error("Instrument token and entry price are required");
       return;
     }
+    const effectiveLotSize =
+      Number.parseInt(gttLotSize || "0") > 0
+        ? Number.parseInt(gttLotSize)
+        : getLotSize(gttInstrumentToken);
+    const rawQty =
+      gttQtyMode === "LOTS"
+        ? Number.parseInt(gttQty || "1") * effectiveLotSize
+        : Number.parseInt(gttQty || String(effectiveLotSize));
+    const actualQty = Math.round(rawQty / effectiveLotSize) * effectiveLotSize;
     setGttPlacing(true);
     const rules: any[] = [];
     rules.push({
@@ -1808,7 +1945,7 @@ function OrdersTab({
           },
           body: JSON.stringify({
             type: gttType,
-            quantity: Number.parseInt(gttQty),
+            quantity: actualQty,
             rules,
             gtt_order_id: gttEditId,
           }),
@@ -1838,7 +1975,7 @@ function OrdersTab({
           },
           body: JSON.stringify({
             type: gttType,
-            quantity: Number.parseInt(gttQty),
+            quantity: actualQty,
             product: gttProduct,
             rules,
             instrument_token: gttInstrumentToken,
@@ -1849,6 +1986,7 @@ function OrdersTab({
         if (res.ok) {
           toast.success(`GTT placed! ID: ${json?.data?.gtt_order_id ?? "—"}`);
           resetGttForm();
+          setShowOrderForm(false);
         } else {
           toast.error(
             `GTT failed: ${
@@ -1893,6 +2031,60 @@ function OrdersTab({
     } catch (e: any) {
       toast.error(`GTT cancel error: ${e.message}`);
     }
+  };
+
+  const fetchGttRowDepth = async (
+    gttOrderId: string,
+    instrumentToken: string,
+  ) => {
+    if (!token || !instrumentToken) return;
+    try {
+      const encoded = encodeURIComponent(instrumentToken);
+      const res = await fetch(
+        `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${encoded}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+        },
+      );
+      if (!res.ok) return;
+      const d = await res.json();
+      const key = Object.keys(d?.data ?? {})[0];
+      const depthData = d?.data?.[key]?.depth;
+      if (depthData) {
+        const bids = (depthData.buy || []).slice(0, 5).map((b: any) => ({
+          price: b.price,
+          quantity: b.quantity,
+          orders: b.orders,
+        }));
+        const asks = (depthData.sell || []).slice(0, 5).map((a: any) => ({
+          price: a.price,
+          quantity: a.quantity,
+          orders: a.orders,
+        }));
+        setGttRowDepthData((prev) => ({
+          ...prev,
+          [gttOrderId]: { bids, asks },
+        }));
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const toggleGttRowDepth = (gttOrderId: string, instrumentToken: string) => {
+    setGttRowDepthOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(gttOrderId)) {
+        next.delete(gttOrderId);
+      } else {
+        next.add(gttOrderId);
+        fetchGttRowDepth(gttOrderId, instrumentToken);
+      }
+      return next;
+    });
   };
 
   const startEditGTT = (gtt: any) => {
@@ -1940,1077 +2132,1448 @@ function OrdersTab({
     ].some((s) => o.status.toLowerCase().includes(s));
 
   return (
-    <div className="space-y-0">
-      {/* Back to Options */}
-      {prefill && onBack && (
-        <div className="px-4 pt-3 pb-1">
+    <>
+      <div className="space-y-0">
+        {/* Back to Options */}
+        {prefill && onBack && (
+          <div className="px-4 pt-3 pb-1">
+            <button
+              data-ocid="orders.back_button"
+              type="button"
+              onClick={onBack}
+              className="flex items-center gap-1.5 text-xs text-primary hover:underline font-medium"
+            >
+              ← Back to Options
+            </button>
+          </div>
+        )}
+
+        {/* Sub-tab pills */}
+        <div className="flex gap-2 px-4 pt-3 pb-2 border-b border-border">
           <button
-            data-ocid="orders.back_button"
+            data-ocid="orders.regular_tab"
             type="button"
-            onClick={onBack}
-            className="flex items-center gap-1.5 text-xs text-primary hover:underline font-medium"
+            onClick={() => setOrderSubTab("regular")}
+            className={`px-3 py-1.5 rounded text-[11px] font-bold transition-colors ${
+              orderSubTab === "regular"
+                ? "bg-primary text-primary-foreground"
+                : "bg-muted text-muted-foreground hover:text-foreground"
+            }`}
           >
-            ← Back to Options
+            Regular Orders
+          </button>
+          <button
+            data-ocid="orders.gtt_tab"
+            type="button"
+            onClick={() => {
+              setOrderSubTab("gtt");
+              // Sync regular order instrument key into GTT instrument token
+              setGttInstrumentToken((prev) => prev || instrumentKey);
+            }}
+            className={`px-3 py-1.5 rounded text-[11px] font-bold transition-colors ${
+              orderSubTab === "gtt"
+                ? "bg-primary text-primary-foreground"
+                : "bg-muted text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            GTT Orders
           </button>
         </div>
-      )}
 
-      {/* Sub-tab pills */}
-      <div className="flex gap-2 px-4 pt-3 pb-2 border-b border-border">
-        <button
-          data-ocid="orders.regular_tab"
-          type="button"
-          onClick={() => setOrderSubTab("regular")}
-          className={`px-3 py-1.5 rounded text-[11px] font-bold transition-colors ${
-            orderSubTab === "regular"
-              ? "bg-primary text-primary-foreground"
-              : "bg-muted text-muted-foreground hover:text-foreground"
-          }`}
-        >
-          Regular Orders
-        </button>
-        <button
-          data-ocid="orders.gtt_tab"
-          type="button"
-          onClick={() => setOrderSubTab("gtt")}
-          className={`px-3 py-1.5 rounded text-[11px] font-bold transition-colors ${
-            orderSubTab === "gtt"
-              ? "bg-primary text-primary-foreground"
-              : "bg-muted text-muted-foreground hover:text-foreground"
-          }`}
-        >
-          GTT Orders
-        </button>
-      </div>
-
-      {orderSubTab === "regular" && (
-        <>
-          {/* Order Form */}
-          <div className="p-4 border-b border-border">
-            <div className="flex items-center justify-between mb-3">
-              <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
-                {editingOrderId
-                  ? `Modify Order · ${editingOrderId.slice(0, 16)}...`
-                  : "Place Order"}
-              </p>
-              {editingOrderId && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEditingOrderId(null);
-                    setPrice("");
-                    setTriggerPrice("");
-                  }}
-                  className="text-[10px] text-muted-foreground hover:text-foreground underline"
-                >
-                  Cancel Edit
-                </button>
-              )}
-            </div>
-
-            {/* BUY / SELL toggle */}
-            <div className="flex gap-0 mb-3 rounded overflow-hidden border border-border">
-              <button
-                data-ocid="orders.buy_toggle"
-                type="button"
-                onClick={() => setTxType("BUY")}
-                className={`flex-1 py-2 text-xs font-bold transition-colors ${
-                  txType === "BUY"
-                    ? "bg-blue-600 text-white"
-                    : "bg-secondary text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                BUY
-              </button>
-              <button
-                data-ocid="orders.sell_toggle"
-                type="button"
-                onClick={() => setTxType("SELL")}
-                className={`flex-1 py-2 text-xs font-bold transition-colors ${
-                  txType === "SELL"
-                    ? "bg-red-600 text-white"
-                    : "bg-secondary text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                SELL
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 gap-2">
-              <div>
-                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                  Instrument Key
-                </Label>
-                <Input
-                  data-ocid="orders.instrument_input"
-                  placeholder="NSE_EQ|INE848E01016"
-                  value={instrumentKey}
-                  onChange={(e) => setInstrumentKey(e.target.value)}
-                  className="h-8 mt-1 bg-secondary border-border font-mono text-xs"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <div className="flex items-center gap-2 mb-1">
-                    <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                      Qty
-                    </Label>
-                    <div className="flex rounded overflow-hidden border border-border text-[9px]">
+        {orderSubTab === "regular" && (
+          <>
+            {/* Order Form */}
+            {showOrderForm && (
+              <>
+                <div className="p-4 border-b border-border">
+                  <div className="flex items-center justify-between mb-3">
+                    <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+                      {editingOrderId
+                        ? `Modify Order · ${editingOrderId.slice(0, 16)}...`
+                        : "Place Order"}
+                    </p>
+                    {editingOrderId && (
                       <button
-                        data-ocid="orders.qty_mode_lots"
                         type="button"
                         onClick={() => {
-                          setQtyMode("LOTS");
-                          setQuantity("1");
+                          setEditingOrderId(null);
+                          setShowOrderForm(false);
+                          setPrice("");
+                          setTriggerPrice("");
                         }}
-                        className={`px-2 py-0.5 font-bold transition-colors ${
-                          qtyMode === "LOTS"
-                            ? "bg-primary text-primary-foreground"
-                            : "bg-secondary text-muted-foreground"
-                        }`}
+                        className="text-[10px] text-muted-foreground hover:text-foreground underline"
                       >
-                        LOTS
+                        Cancel Edit
                       </button>
-                      <button
-                        data-ocid="orders.qty_mode_qty"
-                        type="button"
-                        onClick={() => {
-                          setQtyMode("QTY");
-                          setQuantity(
-                            String(prefillLotSize ?? getLotSize(instrumentKey)),
-                          );
-                        }}
-                        className={`px-2 py-0.5 font-bold transition-colors ${
-                          qtyMode === "QTY"
-                            ? "bg-primary text-primary-foreground"
-                            : "bg-secondary text-muted-foreground"
-                        }`}
-                      >
-                        QTY
-                      </button>
-                    </div>
+                    )}
                   </div>
-                  <div className="flex items-center gap-1">
+
+                  {/* BUY / SELL toggle */}
+                  <div className="flex gap-0 mb-3 rounded overflow-hidden border border-border">
                     <button
-                      data-ocid="orders.qty_decrease_button"
+                      data-ocid="orders.buy_toggle"
                       type="button"
-                      onClick={() => {
-                        const step =
-                          qtyMode === "LOTS" ? 1 : getLotSize(instrumentKey);
-                        setQuantity(
-                          String(
-                            Math.max(
-                              qtyMode === "LOTS" ? 1 : 0,
-                              Number.parseInt(quantity || "1") - step,
-                            ),
-                          ),
-                        );
-                      }}
-                      className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
+                      onClick={() => setTxType("BUY")}
+                      className={`flex-1 py-2 text-xs font-bold transition-colors ${
+                        txType === "BUY"
+                          ? "bg-blue-600 text-white"
+                          : "bg-secondary text-muted-foreground hover:text-foreground"
+                      }`}
                     >
-                      −
+                      BUY
                     </button>
-                    <input
-                      data-ocid="orders.qty_input"
-                      type="number"
-                      value={quantity}
-                      onChange={(e) => setQuantity(e.target.value)}
-                      className="h-8 flex-1 bg-secondary border border-border text-foreground text-xs rounded px-2 text-center font-mono min-w-0"
-                      placeholder={qtyMode === "LOTS" ? "1" : "0"}
-                    />
                     <button
-                      data-ocid="orders.qty_increase_button"
+                      data-ocid="orders.sell_toggle"
                       type="button"
-                      onClick={() => {
-                        const step =
-                          qtyMode === "LOTS" ? 1 : getLotSize(instrumentKey);
-                        setQuantity(
-                          String(Number.parseInt(quantity || "0") + step),
-                        );
-                      }}
-                      className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
+                      onClick={() => setTxType("SELL")}
+                      className={`flex-1 py-2 text-xs font-bold transition-colors ${
+                        txType === "SELL"
+                          ? "bg-red-600 text-white"
+                          : "bg-secondary text-muted-foreground hover:text-foreground"
+                      }`}
                     >
-                      +
+                      SELL
                     </button>
                   </div>
-                  {(() => {
-                    const effectiveLotSize =
-                      Number.parseInt(editableLotSize || "0") > 0
-                        ? Number.parseInt(editableLotSize)
-                        : (prefillLotSize ?? getLotSize(instrumentKey));
-                    const actualQtyPreview =
-                      qtyMode === "LOTS"
-                        ? Number.parseInt(quantity || "1") * effectiveLotSize
-                        : Number.parseInt(quantity || "0");
-                    return (
-                      <div className="flex items-center gap-1 mt-1">
-                        <span className="text-[9px] text-muted-foreground">
-                          Lot Size:
-                        </span>
-                        <input
-                          data-ocid="orders.lot_size_input"
-                          type="number"
-                          value={
-                            editableLotSize !== ""
-                              ? editableLotSize
-                              : String(effectiveLotSize)
-                          }
-                          onChange={(e) => setEditableLotSize(e.target.value)}
-                          className="w-14 h-5 bg-secondary border border-amber-500 text-foreground text-[9px] rounded px-1 text-center font-mono"
-                          title="Edit lot size if order fails with quantity error"
-                        />
-                        <span className="text-[9px] text-muted-foreground">
-                          {qtyMode === "LOTS" ? (
-                            <> = {actualQtyPreview} units</>
-                          ) : (
-                            <>lots OK</>
-                          )}
-                        </span>
-                      </div>
-                    );
-                  })()}
-                </div>
-                <div>
-                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                    Price
-                  </Label>
-                  <Input
-                    data-ocid="orders.price_input"
-                    type="number"
-                    placeholder="0.00"
-                    value={price}
-                    onChange={(e) => setPrice(e.target.value)}
-                    disabled={orderType === "MARKET"}
-                    className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs disabled:opacity-40"
-                  />
-                </div>
-              </div>
 
-              <div className="grid grid-cols-3 gap-2">
-                <div>
-                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                    Type
-                  </Label>
-                  <select
-                    data-ocid="orders.type_select"
-                    value={orderType}
-                    onChange={(e) => setOrderType(e.target.value)}
-                    className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2 font-mono"
-                  >
-                    <option value="MARKET">MKT</option>
-                    <option value="LIMIT">LMT</option>
-                    <option value="SL">SL</option>
-                    <option value="SL-M">SL-M</option>
-                  </select>
-                </div>
-                <div>
-                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                    Product
-                  </Label>
-                  <select
-                    data-ocid="orders.product_select"
-                    value={product}
-                    onChange={(e) => setProduct(e.target.value)}
-                    className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2 font-mono"
-                  >
-                    <option value="D">D - NRML/CNC</option>
-                    <option value="I">I - MIS (Intraday)</option>
-                  </select>
-                </div>
-                <div>
-                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                    Validity
-                  </Label>
-                  <select
-                    value={validity}
-                    onChange={(e) => setValidity(e.target.value)}
-                    className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2 font-mono"
-                  >
-                    <option value="DAY">DAY</option>
-                    <option value="IOC">IOC</option>
-                  </select>
-                </div>
-              </div>
-
-              {(orderType === "SL" || orderType === "SL-M") && (
-                <div>
-                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                    Trigger Price
-                  </Label>
-                  <Input
-                    type="number"
-                    placeholder="0.00"
-                    value={triggerPrice}
-                    onChange={(e) => setTriggerPrice(e.target.value)}
-                    className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs"
-                  />
-                </div>
-              )}
-
-              <button
-                data-ocid="orders.submit_button"
-                type="button"
-                onClick={placeOrder}
-                disabled={placing}
-                className={`w-full h-9 rounded text-xs font-bold transition-colors flex items-center justify-center gap-1.5 ${
-                  txType === "BUY"
-                    ? "bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
-                    : "bg-red-600 hover:bg-red-700 text-white disabled:opacity-50"
-                }`}
-              >
-                {placing && <Loader2 className="w-3 h-3 animate-spin" />}
-                {editingOrderId ? "Modify" : txType} {orderType}
-              </button>
-            </div>
-          </div>
-
-          {/* Market Depth in Order Form */}
-          <div className="mx-4 mb-3 border border-border rounded">
-            <div className="flex items-center justify-between px-2 py-1 border-b border-border bg-secondary/50">
-              <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
-                Market Depth
-              </span>
-              {orderFormDepthLoading && (
-                <span className="text-[9px] text-muted-foreground">
-                  Loading...
-                </span>
-              )}
-            </div>
-            {!orderFormDepthLoading && !orderFormDepth && (
-              <div className="px-3 py-2 text-[10px] text-muted-foreground italic">
-                Depth unavailable (CORS/API)
-              </div>
-            )}
-            <div className="grid grid-cols-2 divide-x divide-border">
-              <div>
-                <div className="grid grid-cols-2 px-2 py-0.5 border-b border-border">
-                  <span className="text-[9px] text-muted-foreground">
-                    BID QTY
-                  </span>
-                  <span className="text-[9px] text-muted-foreground text-right">
-                    BID
-                  </span>
-                </div>
-                {(orderFormDepth?.bids || Array(5).fill(null)).map((b, i) => (
-                  <div
-                    key={b ? `bid-p-${b.price}` : `bid-e-${i}`}
-                    className="grid grid-cols-2 px-2 py-0.5"
-                  >
-                    <span className="text-[10px] text-green-500 font-mono">
-                      {b ? b.quantity : "—"}
-                    </span>
-                    <span className="text-[10px] text-green-500 font-mono text-right">
-                      {b ? b.price.toFixed(2) : "—"}
-                    </span>
-                  </div>
-                ))}
-              </div>
-              <div>
-                <div className="grid grid-cols-2 px-2 py-0.5 border-b border-border">
-                  <span className="text-[9px] text-muted-foreground">ASK</span>
-                  <span className="text-[9px] text-muted-foreground text-right">
-                    ASK QTY
-                  </span>
-                </div>
-                {(orderFormDepth?.asks || Array(5).fill(null)).map((a, i) => (
-                  <div
-                    key={a ? `ask-p-${a.price}` : `ask-e-${i}`}
-                    className="grid grid-cols-2 px-2 py-0.5"
-                  >
-                    <span className="text-[10px] text-red-500 font-mono">
-                      {a ? a.price.toFixed(2) : "—"}
-                    </span>
-                    <span className="text-[10px] text-red-500 font-mono text-right">
-                      {a ? a.quantity : "—"}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-            {orderFormDepth && (
-              <div className="px-2 py-1 border-t border-border">
-                {(() => {
-                  const totalBid = orderFormDepth.bids.reduce(
-                    (s, b) => s + b.quantity,
-                    0,
-                  );
-                  const totalAsk = orderFormDepth.asks.reduce(
-                    (s, a) => s + a.quantity,
-                    0,
-                  );
-                  const total = totalBid + totalAsk || 1;
-                  const bidPct = Math.round((totalBid / total) * 100);
-                  return (
+                  <div className="grid grid-cols-1 gap-2">
                     <div>
-                      <div className="flex justify-between text-[9px] mb-0.5">
-                        <span className="text-green-500">Buy {bidPct}%</span>
-                        <span className="text-red-500">
-                          Sell {100 - bidPct}%
-                        </span>
-                      </div>
-                      <div className="h-1 rounded-full bg-red-500 overflow-hidden">
-                        <div
-                          className="h-full bg-green-500 rounded-full"
-                          style={{ width: `${bidPct}%` }}
-                        />
-                      </div>
+                      <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                        Instrument Key
+                      </Label>
+                      <Input
+                        data-ocid="orders.instrument_input"
+                        placeholder="NSE_EQ|INE848E01016"
+                        value={instrumentKey}
+                        onChange={(e) => setInstrumentKey(e.target.value)}
+                        className="h-8 mt-1 bg-secondary border-border font-mono text-xs"
+                      />
                     </div>
-                  );
-                })()}
-              </div>
-            )}
-          </div>
 
-          {/* Margin Info */}
-          <div
-            data-ocid="orders.margin_panel"
-            className="mx-4 mb-3 border border-border rounded"
-          >
-            <div className="px-2 py-1 border-b border-border bg-secondary/50">
-              <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
-                Margin
-              </span>
-            </div>
-            <div className="grid grid-cols-2 divide-x divide-border">
-              <div className="px-3 py-2">
-                <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">
-                  {isEstimatedMargin ? "Est. Margin" : "Req. Margin"}
-                </div>
-                <div
-                  data-ocid="orders.required_margin"
-                  className="text-xs font-mono font-bold text-amber-400"
-                >
-                  {marginLoading
-                    ? "..."
-                    : requiredMargin !== null
-                      ? `₹${requiredMargin.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                      : "—"}
-                </div>
-              </div>
-              <div className="px-3 py-2">
-                <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">
-                  Available
-                </div>
-                <div
-                  data-ocid="orders.available_margin"
-                  className={`text-xs font-mono font-bold ${
-                    availableMargin !== null &&
-                    requiredMargin !== null &&
-                    availableMargin < requiredMargin
-                      ? "text-red-500"
-                      : "text-green-500"
-                  }`}
-                >
-                  {availableMargin !== null
-                    ? `₹${availableMargin.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                    : "—"}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Order Book */}
-          <div className="p-3">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
-                Order Book
-              </p>
-              <button
-                type="button"
-                onClick={fetchOrders}
-                className="w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground"
-              >
-                <RefreshCw
-                  className={`w-3 h-3 ${loadingOrders ? "animate-spin" : ""}`}
-                />
-              </button>
-            </div>
-
-            {/* Filter tabs */}
-            <div className="flex gap-1 mb-2 overflow-x-auto hide-scrollbar">
-              {(["ALL", "PENDING", "SUCCESS", "CANCELLED"] as const).map(
-                (f) => (
-                  <button
-                    key={f}
-                    type="button"
-                    data-ocid={`orders.filter.${f.toLowerCase()}.tab`}
-                    onClick={() => setOrderStatusFilter(f)}
-                    className={`flex-none px-2.5 py-1 rounded text-[10px] font-bold whitespace-nowrap transition-colors ${
-                      orderStatusFilter === f
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-secondary text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    {f === "SUCCESS" ? "FILLED" : f}
-                  </button>
-                ),
-              )}
-            </div>
-
-            {loadingOrders ? (
-              <div className="space-y-1.5">
-                {[1, 2, 3].map((i) => (
-                  <div
-                    key={i}
-                    className="h-8 rounded bg-secondary animate-pulse"
-                  />
-                ))}
-              </div>
-            ) : orders.length === 0 ? (
-              <div data-ocid="orders.empty_state" className="py-8 text-center">
-                <p className="text-xs text-muted-foreground">No orders</p>
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table
-                  className="w-full text-xs border-collapse min-w-[480px]"
-                  data-ocid="orders.table"
-                >
-                  <thead>
-                    <tr className="border-b border-border">
-                      <th className="py-1.5 px-2 text-left text-[10px] text-muted-foreground font-semibold tracking-wider">
-                        SYMBOL
-                      </th>
-                      <th className="py-1.5 px-2 text-right text-[10px] text-muted-foreground font-semibold tracking-wider">
-                        QTY
-                      </th>
-                      <th className="py-1.5 px-2 text-right text-[10px] text-muted-foreground font-semibold tracking-wider">
-                        PRICE
-                      </th>
-                      <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                        TYPE
-                      </th>
-                      <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                        STATUS
-                      </th>
-                      <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                        ACT
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {orders
-                      .filter((o) => {
-                        if (orderStatusFilter === "ALL") return true;
-                        if (orderStatusFilter === "PENDING")
-                          return isPendingOrder(o);
-                        if (orderStatusFilter === "SUCCESS")
-                          return ["complete", "traded", "filled"].some((s) =>
-                            o.status.toLowerCase().includes(s),
-                          );
-                        if (orderStatusFilter === "CANCELLED")
-                          return ["cancelled", "rejected"].some((s) =>
-                            o.status.toLowerCase().includes(s),
-                          );
-                        return true;
-                      })
-                      .map((order, i) => (
-                        <tr
-                          key={order.order_id}
-                          data-ocid={`orders.row.${i + 1}`}
-                          className="border-b border-border/50 hover:bg-secondary/40 transition-colors"
-                        >
-                          <td className="py-1.5 px-2">
-                            <p className="font-mono font-bold text-foreground text-xs">
-                              {order.tradingsymbol}
-                            </p>
-                            <p
-                              className={`text-[10px] font-bold ${
-                                order.transaction_type === "BUY"
-                                  ? "text-blue-400"
-                                  : "text-loss"
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <div className="flex items-center gap-2 mb-1">
+                          <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                            Qty
+                          </Label>
+                          <div className="flex rounded overflow-hidden border border-border text-[9px]">
+                            <button
+                              data-ocid="orders.qty_mode_lots"
+                              type="button"
+                              onClick={() => {
+                                setQtyMode("LOTS");
+                                setQuantity("1");
+                              }}
+                              className={`px-2 py-0.5 font-bold transition-colors ${
+                                qtyMode === "LOTS"
+                                  ? "bg-primary text-primary-foreground"
+                                  : "bg-secondary text-muted-foreground"
                               }`}
                             >
-                              {order.transaction_type}
-                            </p>
-                          </td>
-                          <td className="py-1.5 px-2 text-right font-mono-data text-foreground">
-                            {order.quantity}
-                          </td>
-                          <td className="py-1.5 px-2 text-right font-mono-data text-foreground">
-                            ₹
-                            {(order.price || order.average_price || 0).toFixed(
-                              2,
-                            )}
-                          </td>
-                          <td className="py-1.5 px-2 text-center">
-                            <span className="text-[10px] font-mono text-muted-foreground">
-                              {order.order_type}
-                            </span>
-                          </td>
-                          <td className="py-1.5 px-2 text-center">
-                            <span
-                              className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${statusBadge(order.status)}`}
+                              LOTS
+                            </button>
+                            <button
+                              data-ocid="orders.qty_mode_qty"
+                              type="button"
+                              onClick={() => {
+                                setQtyMode("QTY");
+                                setQuantity(
+                                  String(
+                                    prefillLotSize ?? getLotSize(instrumentKey),
+                                  ),
+                                );
+                              }}
+                              className={`px-2 py-0.5 font-bold transition-colors ${
+                                qtyMode === "QTY"
+                                  ? "bg-primary text-primary-foreground"
+                                  : "bg-secondary text-muted-foreground"
+                              }`}
                             >
-                              {order.status}
-                            </span>
-                          </td>
-                          <td className="py-1.5 px-2 text-center">
-                            {isPendingOrder(order) && (
-                              <div className="flex items-center justify-center gap-1">
-                                <button
-                                  type="button"
-                                  data-ocid={`orders.edit_button.${i + 1}`}
-                                  onClick={() => startEditOrder(order)}
-                                  title="Edit order"
-                                  className="w-5 h-5 flex items-center justify-center rounded bg-secondary hover:bg-amber-900/40 text-amber-400 transition-colors"
-                                >
-                                  <Pencil className="w-2.5 h-2.5" />
-                                </button>
-                                <button
-                                  type="button"
-                                  data-ocid={`orders.cancel_button.${i + 1}`}
-                                  onClick={() =>
-                                    cancelRegularOrder(order.order_id)
-                                  }
-                                  title="Cancel order"
-                                  className="w-5 h-5 flex items-center justify-center rounded bg-secondary hover:bg-red-900/40 text-red-400 transition-colors"
-                                >
-                                  <X className="w-2.5 h-2.5" />
-                                </button>
-                              </div>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        </>
-      )}
+                              QTY
+                            </button>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button
+                            data-ocid="orders.qty_decrease_button"
+                            type="button"
+                            onClick={() => {
+                              const step =
+                                qtyMode === "LOTS"
+                                  ? 1
+                                  : getLotSize(instrumentKey);
+                              setQuantity(
+                                String(
+                                  Math.max(
+                                    qtyMode === "LOTS" ? 1 : 0,
+                                    Number.parseInt(quantity || "1") - step,
+                                  ),
+                                ),
+                              );
+                            }}
+                            className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
+                          >
+                            −
+                          </button>
+                          <input
+                            data-ocid="orders.qty_input"
+                            type="number"
+                            value={quantity}
+                            onChange={(e) => setQuantity(e.target.value)}
+                            className="h-8 flex-1 bg-secondary border border-border text-foreground text-xs rounded px-2 text-center font-mono min-w-0"
+                            placeholder={qtyMode === "LOTS" ? "1" : "0"}
+                          />
+                          <button
+                            data-ocid="orders.qty_increase_button"
+                            type="button"
+                            onClick={() => {
+                              const step =
+                                qtyMode === "LOTS"
+                                  ? 1
+                                  : getLotSize(instrumentKey);
+                              setQuantity(
+                                String(Number.parseInt(quantity || "0") + step),
+                              );
+                            }}
+                            className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
+                          >
+                            +
+                          </button>
+                        </div>
+                        {(() => {
+                          const effectiveLotSize =
+                            Number.parseInt(editableLotSize || "0") > 0
+                              ? Number.parseInt(editableLotSize)
+                              : (prefillLotSize ?? getLotSize(instrumentKey));
+                          const actualQtyPreview =
+                            qtyMode === "LOTS"
+                              ? Number.parseInt(quantity || "1") *
+                                effectiveLotSize
+                              : Number.parseInt(quantity || "0");
+                          return (
+                            <div className="flex items-center gap-1 mt-1">
+                              <span className="text-[9px] text-muted-foreground">
+                                Lot Size:
+                              </span>
+                              <input
+                                data-ocid="orders.lot_size_input"
+                                type="number"
+                                value={
+                                  editableLotSize !== ""
+                                    ? editableLotSize
+                                    : String(effectiveLotSize)
+                                }
+                                onChange={(e) =>
+                                  setEditableLotSize(e.target.value)
+                                }
+                                className="w-14 h-5 bg-secondary border border-amber-500 text-foreground text-[9px] rounded px-1 text-center font-mono"
+                                title="Edit lot size if order fails with quantity error"
+                              />
+                              <span className="text-[9px] text-muted-foreground">
+                                {qtyMode === "LOTS" ? (
+                                  <> = {actualQtyPreview} units</>
+                                ) : (
+                                  <>lots OK</>
+                                )}
+                              </span>
+                            </div>
+                          );
+                        })()}
+                      </div>
+                      <div>
+                        <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                          Price
+                        </Label>
+                        <Input
+                          data-ocid="orders.price_input"
+                          type="number"
+                          placeholder="0.00"
+                          value={price}
+                          onChange={(e) => setPrice(e.target.value)}
+                          disabled={orderType === "MARKET"}
+                          className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs disabled:opacity-40"
+                        />
+                      </div>
+                    </div>
 
-      {orderSubTab === "gtt" && (
-        <>
-          {/* GTT Order Form */}
-          <div className="p-4 border-b border-border">
-            <div className="flex items-center justify-between mb-3">
-              <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
-                {gttEditId
-                  ? `Update GTT · ${gttEditId.slice(0, 20)}...`
-                  : "Place GTT Order"}
-              </p>
-              {gttEditId && (
-                <button
-                  data-ocid="gtt.cancel_edit_button"
-                  type="button"
-                  onClick={resetGttForm}
-                  className="text-[10px] text-muted-foreground hover:text-foreground underline"
-                >
-                  Cancel Edit
-                </button>
-              )}
-            </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      <div>
+                        <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                          Type
+                        </Label>
+                        <select
+                          data-ocid="orders.type_select"
+                          value={orderType}
+                          onChange={(e) => setOrderType(e.target.value)}
+                          className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2 font-mono"
+                        >
+                          <option value="MARKET">MKT</option>
+                          <option value="LIMIT">LMT</option>
+                          <option value="SL">SL</option>
+                          <option value="SL-M">SL-M</option>
+                        </select>
+                      </div>
+                      <div>
+                        <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                          Product
+                        </Label>
+                        <select
+                          data-ocid="orders.product_select"
+                          value={product}
+                          onChange={(e) => setProduct(e.target.value)}
+                          className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2 font-mono"
+                        >
+                          <option value="D">D - NRML/CNC</option>
+                          <option value="I">I - MIS (Intraday)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                          Validity
+                        </Label>
+                        <select
+                          value={validity}
+                          onChange={(e) => setValidity(e.target.value)}
+                          className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2 font-mono"
+                        >
+                          <option value="DAY">DAY</option>
+                          <option value="IOC">IOC</option>
+                        </select>
+                      </div>
+                    </div>
 
-            {/* BUY / SELL */}
-            <div className="flex gap-0 mb-3 rounded overflow-hidden border border-border">
-              <button
-                data-ocid="gtt.buy_button"
-                type="button"
-                onClick={() => setGttTxType("BUY")}
-                className={`flex-1 py-2 text-xs font-bold transition-colors ${
-                  gttTxType === "BUY"
-                    ? "bg-blue-600 text-white"
-                    : "bg-secondary text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                BUY
-              </button>
-              <button
-                data-ocid="gtt.sell_button"
-                type="button"
-                onClick={() => setGttTxType("SELL")}
-                className={`flex-1 py-2 text-xs font-bold transition-colors ${
-                  gttTxType === "SELL"
-                    ? "bg-red-600 text-white"
-                    : "bg-secondary text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                SELL
-              </button>
-            </div>
+                    {(orderType === "SL" || orderType === "SL-M") && (
+                      <div>
+                        <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                          Trigger Price
+                        </Label>
+                        <Input
+                          type="number"
+                          placeholder="0.00"
+                          value={triggerPrice}
+                          onChange={(e) => setTriggerPrice(e.target.value)}
+                          className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs"
+                        />
+                      </div>
+                    )}
 
-            <div className="grid grid-cols-1 gap-2">
-              {/* Instrument token */}
-              <div>
-                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                  Instrument Token
-                </Label>
-                <Input
-                  data-ocid="gtt.instrument_input"
-                  placeholder="NSE_FO|43919"
-                  value={gttInstrumentToken}
-                  onChange={(e) => setGttInstrumentToken(e.target.value)}
-                  className="h-8 mt-1 bg-secondary border-border font-mono text-xs"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                {/* Quantity */}
-                <div>
-                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                    Qty
-                  </Label>
-                  <div className="flex items-center gap-1 mt-1">
                     <button
+                      data-ocid="orders.submit_button"
                       type="button"
-                      onClick={() =>
-                        setGttQty(
-                          String(
-                            Math.max(1, Number.parseInt(gttQty || "1") - 1),
-                          ),
-                        )
-                      }
-                      className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
+                      onClick={placeOrder}
+                      disabled={placing}
+                      className={`w-full h-9 rounded text-xs font-bold transition-colors flex items-center justify-center gap-1.5 ${
+                        txType === "BUY"
+                          ? "bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
+                          : "bg-red-600 hover:bg-red-700 text-white disabled:opacity-50"
+                      }`}
                     >
-                      −
-                    </button>
-                    <input
-                      type="number"
-                      value={gttQty}
-                      onChange={(e) => setGttQty(e.target.value)}
-                      className="h-8 flex-1 bg-secondary border border-border text-foreground text-xs rounded px-2 text-center font-mono min-w-0"
-                    />
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setGttQty(String(Number.parseInt(gttQty || "0") + 1))
-                      }
-                      className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
-                    >
-                      +
+                      {placing && <Loader2 className="w-3 h-3 animate-spin" />}
+                      {editingOrderId ? "Modify" : txType} {orderType}
                     </button>
                   </div>
                 </div>
 
-                {/* Product */}
-                <div>
-                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                    Product
-                  </Label>
-                  <select
-                    value={gttProduct}
-                    onChange={(e) => setGttProduct(e.target.value)}
-                    className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2 font-mono"
+                {/* Market Depth in Order Form */}
+                <div className="mx-4 mb-3 border border-border rounded">
+                  <div className="flex items-center justify-between px-2 py-1 border-b border-border bg-secondary/50">
+                    <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+                      Market Depth
+                    </span>
+                    {orderFormDepthLoading && (
+                      <span className="text-[9px] text-muted-foreground">
+                        Loading...
+                      </span>
+                    )}
+                  </div>
+                  {!orderFormDepthLoading && !orderFormDepth && (
+                    <div className="px-3 py-2 text-[10px] text-muted-foreground italic">
+                      Depth unavailable (CORS/API)
+                    </div>
+                  )}
+                  <div className="grid grid-cols-2 divide-x divide-border">
+                    <div>
+                      <div className="grid grid-cols-2 px-2 py-0.5 border-b border-border">
+                        <span className="text-[9px] text-muted-foreground">
+                          BID QTY
+                        </span>
+                        <span className="text-[9px] text-muted-foreground text-right">
+                          BID
+                        </span>
+                      </div>
+                      {(orderFormDepth?.bids || Array(5).fill(null)).map(
+                        (b, i) => (
+                          <div
+                            key={b ? `bid-p-${b.price}` : `bid-e-${i}`}
+                            className="grid grid-cols-2 px-2 py-0.5"
+                          >
+                            <span className="text-[10px] text-green-500 font-mono">
+                              {b ? b.quantity : "—"}
+                            </span>
+                            <span className="text-[10px] text-green-500 font-mono text-right">
+                              {b ? b.price.toFixed(2) : "—"}
+                            </span>
+                          </div>
+                        ),
+                      )}
+                    </div>
+                    <div>
+                      <div className="grid grid-cols-2 px-2 py-0.5 border-b border-border">
+                        <span className="text-[9px] text-muted-foreground">
+                          ASK
+                        </span>
+                        <span className="text-[9px] text-muted-foreground text-right">
+                          ASK QTY
+                        </span>
+                      </div>
+                      {(orderFormDepth?.asks || Array(5).fill(null)).map(
+                        (a, i) => (
+                          <div
+                            key={a ? `ask-p-${a.price}` : `ask-e-${i}`}
+                            className="grid grid-cols-2 px-2 py-0.5"
+                          >
+                            <span className="text-[10px] text-red-500 font-mono">
+                              {a ? a.price.toFixed(2) : "—"}
+                            </span>
+                            <span className="text-[10px] text-red-500 font-mono text-right">
+                              {a ? a.quantity : "—"}
+                            </span>
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  </div>
+                  {orderFormDepth && (
+                    <div className="px-2 py-1 border-t border-border">
+                      {(() => {
+                        const totalBid = orderFormDepth.bids.reduce(
+                          (s, b) => s + b.quantity,
+                          0,
+                        );
+                        const totalAsk = orderFormDepth.asks.reduce(
+                          (s, a) => s + a.quantity,
+                          0,
+                        );
+                        const total = totalBid + totalAsk || 1;
+                        const bidPct = Math.round((totalBid / total) * 100);
+                        return (
+                          <div>
+                            <div className="flex justify-between text-[9px] mb-0.5">
+                              <span className="text-green-500">
+                                Buy {bidPct}%
+                              </span>
+                              <span className="text-red-500">
+                                Sell {100 - bidPct}%
+                              </span>
+                            </div>
+                            <div className="h-1 rounded-full bg-red-500 overflow-hidden">
+                              <div
+                                className="h-full bg-green-500 rounded-full"
+                                style={{ width: `${bidPct}%` }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </div>
+
+                {/* Margin Info */}
+                <div
+                  data-ocid="orders.margin_panel"
+                  className="mx-4 mb-3 border border-border rounded"
+                >
+                  <div className="px-2 py-1 border-b border-border bg-secondary/50">
+                    <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+                      Margin
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 divide-x divide-border">
+                    <div className="px-3 py-2">
+                      <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">
+                        {isEstimatedMargin ? "Est. Margin" : "Req. Margin"}
+                      </div>
+                      <div
+                        data-ocid="orders.required_margin"
+                        className="text-xs font-mono font-bold text-amber-400"
+                      >
+                        {marginLoading
+                          ? "..."
+                          : requiredMargin !== null
+                            ? `₹${requiredMargin.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                            : "—"}
+                      </div>
+                    </div>
+                    <div className="px-3 py-2">
+                      <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">
+                        Available
+                      </div>
+                      <div
+                        data-ocid="orders.available_margin"
+                        className={`text-xs font-mono font-bold ${
+                          availableMargin !== null &&
+                          requiredMargin !== null &&
+                          availableMargin < requiredMargin
+                            ? "text-red-500"
+                            : "text-green-500"
+                        }`}
+                      >
+                        {availableMargin !== null
+                          ? `₹${availableMargin.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                          : "—"}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* Order Book */}
+            <div className="p-3">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+                  Order Book
+                </p>
+                <div className="flex items-center gap-2">
+                  {!showOrderForm && (
+                    <button
+                      type="button"
+                      data-ocid="orders.new_order_button"
+                      onClick={() => setShowOrderForm(true)}
+                      className="flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold bg-primary text-primary-foreground hover:opacity-90 transition-opacity"
+                    >
+                      <Plus className="w-3 h-3" /> New Order
+                    </button>
+                  )}
+                  {showOrderForm && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowOrderForm(false);
+                        setEditingOrderId(null);
+                      }}
+                      className="flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <X className="w-3 h-3" /> Hide Form
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={fetchOrders}
+                    className="w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground"
                   >
-                    <option value="D">D (Delivery)</option>
-                    <option value="I">I (Intraday)</option>
-                    <option value="CNC">CNC</option>
-                  </select>
+                    <RefreshCw
+                      className={`w-3 h-3 ${loadingOrders ? "animate-spin" : ""}`}
+                    />
+                  </button>
                 </div>
               </div>
 
-              {/* GTT Type toggle */}
-              <div>
-                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1 block">
-                  GTT Type
-                </Label>
-                <div className="flex gap-0 rounded overflow-hidden border border-border">
-                  <button
-                    data-ocid="gtt.type_single_toggle"
-                    type="button"
-                    onClick={() => setGttType("SINGLE")}
-                    className={`flex-1 py-1.5 text-xs font-bold transition-colors ${
-                      gttType === "SINGLE"
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-secondary text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    SINGLE
-                  </button>
-                  <button
-                    data-ocid="gtt.type_multiple_toggle"
-                    type="button"
-                    onClick={() => setGttType("MULTIPLE")}
-                    className={`flex-1 py-1.5 text-xs font-bold transition-colors ${
-                      gttType === "MULTIPLE"
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-secondary text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    MULTIPLE
-                  </button>
-                </div>
-                {gttType === "MULTIPLE" && (
-                  <p className="text-[9px] text-muted-foreground mt-0.5">
-                    Entry + Target + SL (bracket order)
-                  </p>
+              {/* Filter tabs */}
+              <div className="flex gap-1 mb-2 overflow-x-auto hide-scrollbar">
+                {(["ALL", "PENDING", "SUCCESS", "CANCELLED"] as const).map(
+                  (f) => (
+                    <button
+                      key={f}
+                      type="button"
+                      data-ocid={`orders.filter.${f.toLowerCase()}.tab`}
+                      onClick={() => setOrderStatusFilter(f)}
+                      className={`flex-none px-2.5 py-1 rounded text-[10px] font-bold whitespace-nowrap transition-colors ${
+                        orderStatusFilter === f
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-secondary text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {f === "SUCCESS" ? "FILLED" : f}
+                    </button>
+                  ),
                 )}
               </div>
 
-              {/* Entry trigger */}
-              <div>
-                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                  Entry Trigger Price
-                </Label>
-                <div className="flex gap-1 mt-1">
-                  <Input
-                    type="number"
-                    placeholder="Entry price"
-                    value={gttEntryPrice}
-                    onChange={(e) => setGttEntryPrice(e.target.value)}
-                    className="h-8 flex-1 bg-secondary border-border font-mono text-xs"
-                  />
-                  <div className="flex rounded overflow-hidden border border-border">
+              {loadingOrders ? (
+                <div className="space-y-1.5">
+                  {[1, 2, 3].map((i) => (
+                    <div
+                      key={i}
+                      className="h-8 rounded bg-secondary animate-pulse"
+                    />
+                  ))}
+                </div>
+              ) : orders.length === 0 ? (
+                <div
+                  data-ocid="orders.empty_state"
+                  className="py-8 text-center"
+                >
+                  <p className="text-xs text-muted-foreground">No orders</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table
+                    className="w-full text-xs border-collapse min-w-[480px]"
+                    data-ocid="orders.table"
+                  >
+                    <thead>
+                      <tr className="border-b border-border">
+                        <th className="py-1.5 px-2 text-left text-[10px] text-muted-foreground font-semibold tracking-wider">
+                          SYMBOL
+                        </th>
+                        <th className="py-1.5 px-2 text-right text-[10px] text-muted-foreground font-semibold tracking-wider">
+                          QTY
+                        </th>
+                        <th className="py-1.5 px-2 text-right text-[10px] text-muted-foreground font-semibold tracking-wider">
+                          PRICE
+                        </th>
+                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
+                          TYPE
+                        </th>
+                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
+                          STATUS
+                        </th>
+                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
+                          ACT
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {orders
+                        .filter((o) => {
+                          if (orderStatusFilter === "ALL") return true;
+                          if (orderStatusFilter === "PENDING")
+                            return isPendingOrder(o);
+                          if (orderStatusFilter === "SUCCESS")
+                            return ["complete", "traded", "filled"].some((s) =>
+                              o.status.toLowerCase().includes(s),
+                            );
+                          if (orderStatusFilter === "CANCELLED")
+                            return ["cancelled", "rejected"].some((s) =>
+                              o.status.toLowerCase().includes(s),
+                            );
+                          return true;
+                        })
+                        .map((order, i) => (
+                          <tr
+                            key={order.order_id}
+                            data-ocid={`orders.row.${i + 1}`}
+                            className="border-b border-border/50 hover:bg-secondary/40 transition-colors"
+                          >
+                            <td className="py-1.5 px-2">
+                              <p className="font-mono font-bold text-foreground text-xs">
+                                {order.tradingsymbol}
+                              </p>
+                              <p
+                                className={`text-[10px] font-bold ${
+                                  order.transaction_type === "BUY"
+                                    ? "text-blue-400"
+                                    : "text-loss"
+                                }`}
+                              >
+                                {order.transaction_type}
+                              </p>
+                            </td>
+                            <td className="py-1.5 px-2 text-right font-mono-data text-foreground">
+                              {order.quantity}
+                            </td>
+                            <td className="py-1.5 px-2 text-right font-mono-data text-foreground">
+                              ₹
+                              {(
+                                order.price ||
+                                order.average_price ||
+                                0
+                              ).toFixed(2)}
+                            </td>
+                            <td className="py-1.5 px-2 text-center">
+                              <span className="text-[10px] font-mono text-muted-foreground">
+                                {order.order_type}
+                              </span>
+                            </td>
+                            <td className="py-1.5 px-2 text-center">
+                              <span
+                                className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${statusBadge(order.status)}`}
+                              >
+                                {order.status}
+                              </span>
+                            </td>
+                            <td className="py-1.5 px-2 text-center">
+                              {isPendingOrder(order) && (
+                                <div className="flex items-center justify-center gap-1">
+                                  <button
+                                    type="button"
+                                    data-ocid={`orders.edit_button.${i + 1}`}
+                                    onClick={() => startEditOrder(order)}
+                                    title="Edit order"
+                                    className="w-5 h-5 flex items-center justify-center rounded bg-secondary hover:bg-amber-900/40 text-amber-400 transition-colors"
+                                  >
+                                    <Pencil className="w-2.5 h-2.5" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    data-ocid={`orders.cancel_button.${i + 1}`}
+                                    onClick={() =>
+                                      setCancelConfirm({
+                                        orderId: order.order_id,
+                                        type: "regular",
+                                      })
+                                    }
+                                    title="Cancel order"
+                                    className="w-5 h-5 flex items-center justify-center rounded bg-secondary hover:bg-red-900/40 text-red-400 transition-colors"
+                                  >
+                                    <X className="w-2.5 h-2.5" />
+                                  </button>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {orderSubTab === "gtt" && (
+          <>
+            {/* GTT Order Form — Bracket Order Design */}
+            {(showGttForm || gttEditId) && (
+              <div className="border-b border-border">
+                {/* Colored header bar */}
+                <div
+                  className={`px-4 py-2.5 flex items-center justify-between ${gttTxType === "BUY" ? "bg-blue-600" : "bg-red-600"}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-white font-black text-sm">
+                      {gttTxType === "BUY" ? "▲ BUY GTT" : "▼ SELL GTT"}
+                    </span>
+                    <span className="text-white/70 text-[10px] font-bold">
+                      — {gttType}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1">
                     <button
+                      data-ocid="gtt.buy_button"
                       type="button"
-                      onClick={() => setGttEntryTriggerType("ABOVE")}
-                      className={`px-2 text-[10px] font-bold transition-colors ${
-                        gttEntryTriggerType === "ABOVE"
-                          ? "bg-blue-600 text-white"
-                          : "bg-secondary text-muted-foreground"
-                      }`}
+                      onClick={() => setGttTxType("BUY")}
+                      className={`px-3 py-1 rounded text-[10px] font-bold transition-colors ${gttTxType === "BUY" ? "bg-white text-blue-700" : "bg-blue-500/40 text-white hover:bg-blue-500/60"}`}
                     >
-                      ↑ ABOVE
+                      BUY
                     </button>
                     <button
+                      data-ocid="gtt.sell_button"
                       type="button"
-                      onClick={() => setGttEntryTriggerType("BELOW")}
-                      className={`px-2 text-[10px] font-bold transition-colors ${
-                        gttEntryTriggerType === "BELOW"
-                          ? "bg-amber-600 text-white"
-                          : "bg-secondary text-muted-foreground"
-                      }`}
+                      onClick={() => setGttTxType("SELL")}
+                      className={`px-3 py-1 rounded text-[10px] font-bold transition-colors ${gttTxType === "SELL" ? "bg-white text-red-700" : "bg-red-500/40 text-white hover:bg-red-500/60"}`}
                     >
-                      ↓ BELOW
+                      SELL
                     </button>
+                    {gttEditId && (
+                      <button
+                        data-ocid="gtt.cancel_edit_button"
+                        type="button"
+                        onClick={resetGttForm}
+                        className="ml-1 px-2 py-1 rounded text-[10px] bg-white/20 text-white hover:bg-white/30"
+                      >
+                        ✕ Cancel Edit
+                      </button>
+                    )}
                   </div>
                 </div>
-              </div>
 
-              {/* MULTIPLE: target + SL + trailing */}
-              {gttType === "MULTIPLE" && (
-                <>
+                <div className="p-3 space-y-3">
+                  {/* Instrument + Qty row */}
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                        Target Price
+                        Instrument Token
                       </Label>
                       <Input
-                        type="number"
-                        placeholder="Target price"
-                        value={gttTargetPrice}
-                        onChange={(e) => setGttTargetPrice(e.target.value)}
+                        data-ocid="gtt.instrument_input"
+                        placeholder="NSE_FO|43919"
+                        value={gttInstrumentToken}
+                        onChange={(e) => setGttInstrumentToken(e.target.value)}
                         className="h-8 mt-1 bg-secondary border-border font-mono text-xs"
                       />
                     </div>
                     <div>
-                      <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                        SL Price
-                      </Label>
-                      <Input
-                        type="number"
-                        placeholder="Stop-loss price"
-                        value={gttSlPrice}
-                        onChange={(e) => setGttSlPrice(e.target.value)}
-                        className="h-8 mt-1 bg-secondary border-border font-mono text-xs"
-                      />
+                      <div className="flex items-center justify-between mb-1">
+                        <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                          Qty
+                        </Label>
+                        <div className="flex rounded overflow-hidden border border-border text-[9px]">
+                          <button
+                            data-ocid="gtt.qty_mode_lots"
+                            type="button"
+                            onClick={() => {
+                              setGttQtyMode("LOTS");
+                              setGttQty("1");
+                            }}
+                            className={`px-2 py-0.5 font-bold transition-colors ${gttQtyMode === "LOTS" ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground"}`}
+                          >
+                            LOTS
+                          </button>
+                          <button
+                            data-ocid="gtt.qty_mode_qty"
+                            type="button"
+                            onClick={() => {
+                              setGttQtyMode("QTY");
+                              setGttQty(String(getLotSize(gttInstrumentToken)));
+                            }}
+                            className={`px-2 py-0.5 font-bold transition-colors ${gttQtyMode === "QTY" ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground"}`}
+                          >
+                            QTY
+                          </button>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          data-ocid="gtt.qty_decrease_button"
+                          type="button"
+                          onClick={() => {
+                            const step =
+                              gttQtyMode === "LOTS"
+                                ? 1
+                                : getLotSize(gttInstrumentToken);
+                            setGttQty(
+                              String(
+                                Math.max(
+                                  gttQtyMode === "LOTS" ? 1 : 0,
+                                  Number.parseInt(gttQty || "1") - step,
+                                ),
+                              ),
+                            );
+                          }}
+                          className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
+                        >
+                          −
+                        </button>
+                        <input
+                          data-ocid="gtt.qty_input"
+                          type="number"
+                          value={gttQty}
+                          onChange={(e) => setGttQty(e.target.value)}
+                          className="h-8 flex-1 bg-secondary border border-border text-foreground text-xs rounded px-2 text-center font-mono min-w-0"
+                          placeholder={gttQtyMode === "LOTS" ? "1" : "0"}
+                        />
+                        <button
+                          data-ocid="gtt.qty_increase_button"
+                          type="button"
+                          onClick={() => {
+                            const step =
+                              gttQtyMode === "LOTS"
+                                ? 1
+                                : getLotSize(gttInstrumentToken);
+                            setGttQty(
+                              String(Number.parseInt(gttQty || "0") + step),
+                            );
+                          }}
+                          className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
+                        >
+                          +
+                        </button>
+                      </div>
+                      {(() => {
+                        const ls =
+                          Number.parseInt(gttLotSize || "0") > 0
+                            ? Number.parseInt(gttLotSize)
+                            : getLotSize(gttInstrumentToken);
+                        const aq =
+                          gttQtyMode === "LOTS"
+                            ? Number.parseInt(gttQty || "1") * ls
+                            : Number.parseInt(gttQty || String(ls));
+                        return (
+                          <p className="text-[10px] text-muted-foreground mt-0.5">
+                            {gttQtyMode === "LOTS"
+                              ? `= ${aq} qty (lot: ${ls})`
+                              : `= ${Math.floor(aq / ls)} lots (lot: ${ls})`}
+                          </p>
+                        );
+                      })()}
+                      <div className="mt-1">
+                        <Label className="text-[10px] text-amber-400 uppercase tracking-wider">
+                          Lot Override
+                        </Label>
+                        <input
+                          type="number"
+                          value={gttLotSize}
+                          onChange={(e) => setGttLotSize(e.target.value)}
+                          placeholder={String(getLotSize(gttInstrumentToken))}
+                          className="w-full h-7 mt-0.5 bg-secondary border border-amber-500/50 text-foreground text-xs rounded px-2 font-mono"
+                        />
+                      </div>
                     </div>
                   </div>
-                  <div>
-                    <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                      Trailing Gap (optional)
-                    </Label>
-                    <Input
-                      type="number"
-                      placeholder="e.g. 0.1 — trailing SL gap"
-                      value={gttTrailingGap}
-                      onChange={(e) => setGttTrailingGap(e.target.value)}
-                      className="h-8 mt-1 bg-secondary border-border font-mono text-xs"
-                    />
-                    <p className="text-[9px] text-muted-foreground mt-0.5">
-                      Leave blank for fixed SL. Set a value for trailing SL.
-                    </p>
-                  </div>
-                </>
-              )}
 
-              <button
-                data-ocid="gtt.submit_button"
-                type="button"
-                onClick={submitGTTOrder}
-                disabled={gttPlacing}
-                className={`w-full h-9 rounded text-xs font-bold transition-colors flex items-center justify-center gap-1.5 ${
-                  gttTxType === "BUY"
-                    ? "bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
-                    : "bg-red-600 hover:bg-red-700 text-white disabled:opacity-50"
-                }`}
-              >
-                {gttPlacing && <Loader2 className="w-3 h-3 animate-spin" />}
-                {gttEditId ? "Update GTT" : "Place GTT"}
-              </button>
-            </div>
-          </div>
-
-          {/* GTT Order Book */}
-          <div className="p-3">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
-                GTT Orders
-              </p>
-              <button
-                type="button"
-                onClick={fetchGTTOrders}
-                className="w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground"
-              >
-                <RefreshCw
-                  className={`w-3 h-3 ${gttLoading ? "animate-spin" : ""}`}
-                />
-              </button>
-            </div>
-
-            {gttLoading && gttOrders.length === 0 ? (
-              <div className="space-y-1.5">
-                {[1, 2, 3].map((i) => (
-                  <div
-                    key={i}
-                    className="h-10 rounded bg-secondary animate-pulse"
-                  />
-                ))}
-              </div>
-            ) : gttOrders.length === 0 ? (
-              <div data-ocid="gtt.empty_state" className="py-8 text-center">
-                <p className="text-xs text-muted-foreground">No GTT orders</p>
-                <p className="text-[10px] text-muted-foreground mt-1">
-                  Use the form above to place a GTT order
-                </p>
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table
-                  className="w-full text-xs border-collapse min-w-[520px]"
-                  data-ocid="gtt.table"
-                >
-                  <thead>
-                    <tr className="border-b border-border">
-                      <th className="py-1.5 px-2 text-left text-[10px] text-muted-foreground font-semibold tracking-wider">
-                        SYMBOL
-                      </th>
-                      <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                        TYPE
-                      </th>
-                      <th className="py-1.5 px-2 text-right text-[10px] text-muted-foreground font-semibold tracking-wider">
-                        QTY
-                      </th>
-                      <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                        RULES
-                      </th>
-                      <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                        STATUS
-                      </th>
-                      <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                        ACT
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {gttOrders.map((gtt, i) => {
-                      const entryRule = (gtt.rules || []).find(
-                        (r: any) => r.strategy === "ENTRY",
-                      );
-                      const tgtRule = (gtt.rules || []).find(
-                        (r: any) => r.strategy === "TARGET",
-                      );
-                      const slRule = (gtt.rules || []).find(
-                        (r: any) => r.strategy === "STOPLOSS",
-                      );
-                      return (
-                        <tr
-                          key={gtt.gtt_order_id || gtt.id || i}
-                          data-ocid={`gtt.row.${i + 1}`}
-                          className="border-b border-border/50 hover:bg-secondary/40 transition-colors"
+                  {/* Product + GTT Type row */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                        Product
+                      </Label>
+                      <select
+                        value={gttProduct}
+                        onChange={(e) => setGttProduct(e.target.value)}
+                        className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2"
+                      >
+                        <option value="D">D (NRML/CNC)</option>
+                        <option value="I">I (MIS)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                        Type
+                      </Label>
+                      <div className="flex mt-1 rounded overflow-hidden border border-border">
+                        <button
+                          data-ocid="gtt.type_single_toggle"
+                          type="button"
+                          onClick={() => setGttType("SINGLE")}
+                          className={`flex-1 py-1.5 text-xs font-bold transition-colors ${gttType === "SINGLE" ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:text-foreground"}`}
                         >
-                          <td className="py-1.5 px-2">
-                            <p className="font-mono font-bold text-foreground text-xs">
-                              {gtt.instrument_token || gtt.tradingsymbol || "—"}
-                            </p>
-                            <p
-                              className={`text-[10px] font-bold ${
-                                gtt.transaction_type === "BUY"
-                                  ? "text-blue-400"
-                                  : "text-loss"
-                              }`}
-                            >
-                              {gtt.transaction_type}
-                            </p>
-                          </td>
-                          <td className="py-1.5 px-2 text-center">
-                            <span className="text-[10px] font-mono text-muted-foreground">
-                              {gtt.type}
-                            </span>
-                          </td>
-                          <td className="py-1.5 px-2 text-right font-mono-data text-foreground">
-                            {gtt.quantity}
-                          </td>
-                          <td className="py-1.5 px-2">
-                            <div className="flex flex-wrap gap-0.5 justify-center">
-                              {entryRule && (
-                                <span className="text-[9px] px-1 py-0.5 rounded bg-blue-950 text-blue-400 border border-blue-800/40 font-mono">
-                                  E:{entryRule.trigger_price}
-                                </span>
-                              )}
-                              {tgtRule && (
-                                <span className="text-[9px] px-1 py-0.5 rounded bg-green-950 text-green-400 border border-green-800/40 font-mono">
-                                  T:{tgtRule.trigger_price}
-                                </span>
-                              )}
-                              {slRule && (
-                                <span className="text-[9px] px-1 py-0.5 rounded bg-red-950 text-red-400 border border-red-800/40 font-mono">
-                                  SL:{slRule.trigger_price}
-                                  {slRule.trailing_gap
-                                    ? `(T${slRule.trailing_gap})`
-                                    : ""}
-                                </span>
-                              )}
-                            </div>
-                          </td>
-                          <td className="py-1.5 px-2 text-center">
-                            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded border bg-secondary text-muted-foreground border-border">
-                              {gtt.status || "active"}
-                            </span>
-                          </td>
-                          <td className="py-1.5 px-2 text-center">
-                            <div className="flex items-center justify-center gap-1">
-                              <button
-                                type="button"
-                                data-ocid={`gtt.edit_button.${i + 1}`}
-                                onClick={() => startEditGTT(gtt)}
-                                title="Edit GTT"
-                                className="w-5 h-5 flex items-center justify-center rounded bg-secondary hover:bg-amber-900/40 text-amber-400 transition-colors"
-                              >
-                                <Pencil className="w-2.5 h-2.5" />
-                              </button>
-                              <button
-                                type="button"
-                                data-ocid={`gtt.cancel_button.${i + 1}`}
-                                onClick={() =>
-                                  cancelGTTOrder(gtt.gtt_order_id || gtt.id)
-                                }
-                                title="Cancel GTT"
-                                className="w-5 h-5 flex items-center justify-center rounded bg-secondary hover:bg-red-900/40 text-red-400 transition-colors"
-                              >
-                                <X className="w-2.5 h-2.5" />
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                          SINGLE
+                        </button>
+                        <button
+                          data-ocid="gtt.type_multiple_toggle"
+                          type="button"
+                          onClick={() => setGttType("MULTIPLE")}
+                          className={`flex-1 py-1.5 text-xs font-bold transition-colors ${gttType === "MULTIPLE" ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:text-foreground"}`}
+                        >
+                          MULTIPLE
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Bracket Order Visual */}
+                  <div className="space-y-1">
+                    {/* TARGET — only for MULTIPLE */}
+                    {gttType === "MULTIPLE" && (
+                      <div className="rounded-lg border border-green-700/50 bg-green-950/40 p-3">
+                        <div className="flex items-center gap-1.5 mb-2">
+                          <span className="text-green-400 font-black text-xs">
+                            ▲ TARGET
+                          </span>
+                          <span className="text-green-600/70 text-[9px]">
+                            Exit with profit
+                          </span>
+                        </div>
+                        <Input
+                          type="number"
+                          placeholder="Target price"
+                          value={gttTargetPrice}
+                          onChange={(e) => setGttTargetPrice(e.target.value)}
+                          className="h-8 bg-green-950/60 border-green-700/60 font-mono text-xs text-green-200 placeholder:text-green-800"
+                        />
+                      </div>
+                    )}
+
+                    {/* Connector line */}
+                    {gttType === "MULTIPLE" && (
+                      <div className="flex justify-center">
+                        <div className="w-px h-3 bg-border" />
+                      </div>
+                    )}
+
+                    {/* ENTRY — always shown */}
+                    <div
+                      className={`rounded-lg border p-3 ${gttTxType === "BUY" ? "border-blue-600/60 bg-blue-950/40" : "border-red-600/60 bg-red-950/30"}`}
+                    >
+                      <div className="flex items-center gap-1.5 mb-2">
+                        <span
+                          className={`font-black text-xs ${gttTxType === "BUY" ? "text-blue-400" : "text-red-400"}`}
+                        >
+                          {gttTxType === "BUY" ? "▲" : "▼"} ENTRY TRIGGER
+                        </span>
+                        <span className="text-muted-foreground text-[9px]">
+                          When price goes
+                        </span>
+                        {/* ABOVE / BELOW toggle inline */}
+                        <div className="flex rounded overflow-hidden border border-border ml-auto">
+                          <button
+                            type="button"
+                            onClick={() => setGttEntryTriggerType("ABOVE")}
+                            className={`px-2 text-[9px] font-bold transition-colors ${gttEntryTriggerType === "ABOVE" ? "bg-blue-600 text-white" : "bg-secondary text-muted-foreground"}`}
+                          >
+                            ↑ ABOVE
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setGttEntryTriggerType("BELOW")}
+                            className={`px-2 text-[9px] font-bold transition-colors ${gttEntryTriggerType === "BELOW" ? "bg-amber-600 text-white" : "bg-secondary text-muted-foreground"}`}
+                          >
+                            ↓ BELOW
+                          </button>
+                        </div>
+                      </div>
+                      <Input
+                        type="number"
+                        placeholder="Entry trigger price"
+                        value={gttEntryPrice}
+                        onChange={(e) => setGttEntryPrice(e.target.value)}
+                        className={`h-9 font-mono text-sm font-bold ${gttTxType === "BUY" ? "bg-blue-950/60 border-blue-700/60 text-blue-200 placeholder:text-blue-800" : "bg-red-950/60 border-red-700/60 text-red-200 placeholder:text-red-800"}`}
+                      />
+                    </div>
+
+                    {/* Connector line */}
+                    {gttType === "MULTIPLE" && (
+                      <div className="flex justify-center">
+                        <div className="w-px h-3 bg-border" />
+                      </div>
+                    )}
+
+                    {/* STOPLOSS — only for MULTIPLE */}
+                    {gttType === "MULTIPLE" && (
+                      <div className="rounded-lg border border-red-700/50 bg-red-950/40 p-3">
+                        <div className="flex items-center gap-1.5 mb-2">
+                          <span className="text-red-400 font-black text-xs">
+                            ▼ STOPLOSS
+                          </span>
+                          <span className="text-red-600/70 text-[9px]">
+                            Exit to limit loss
+                          </span>
+                        </div>
+                        <Input
+                          type="number"
+                          placeholder="Stop-loss price"
+                          value={gttSlPrice}
+                          onChange={(e) => setGttSlPrice(e.target.value)}
+                          className="h-8 mb-2 bg-red-950/60 border-red-700/60 font-mono text-xs text-red-200 placeholder:text-red-800"
+                        />
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-red-400/80 font-semibold whitespace-nowrap">
+                            Trailing Gap
+                          </span>
+                          <Input
+                            type="number"
+                            placeholder="e.g. 0.1 (optional)"
+                            value={gttTrailingGap}
+                            onChange={(e) => setGttTrailingGap(e.target.value)}
+                            className="h-7 flex-1 bg-red-950/60 border-red-700/60 font-mono text-xs text-red-200 placeholder:text-red-800"
+                          />
+                        </div>
+                        <p className="text-[9px] text-red-600/70 mt-1">
+                          Leave blank for fixed SL. Set trailing gap to
+                          auto-trail.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Submit button */}
+                  <button
+                    data-ocid="gtt.submit_button"
+                    type="button"
+                    onClick={submitGTTOrder}
+                    disabled={gttPlacing}
+                    className={`w-full h-10 rounded-lg text-sm font-black transition-colors flex items-center justify-center gap-2 ${
+                      gttTxType === "BUY"
+                        ? "bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50"
+                        : "bg-red-600 hover:bg-red-500 text-white disabled:opacity-50"
+                    }`}
+                  >
+                    {gttPlacing && <Loader2 className="w-4 h-4 animate-spin" />}
+                    {gttTxType === "BUY" ? "▲" : "▼"}{" "}
+                    {gttEditId ? "Update GTT Order" : "Place GTT Order"}
+                  </button>
+
+                  {/* Market Depth — always visible */}
+                  <div className="border border-border rounded-lg overflow-hidden">
+                    <div className="px-3 py-2 bg-secondary/50 border-b border-border">
+                      <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">
+                        Market Depth
+                      </span>
+                    </div>
+                    {gttInstrumentToken.trim() ? (
+                      gttDepthLoading && !gttDepth ? (
+                        <div className="h-20 animate-pulse bg-secondary m-2 rounded" />
+                      ) : gttDepth ? (
+                        <div className="p-2">
+                          <DepthRows depth={gttDepth} />
+                        </div>
+                      ) : (
+                        <p className="text-[10px] text-muted-foreground text-center py-4">
+                          No depth data available
+                        </p>
+                      )
+                    ) : (
+                      <p className="text-[10px] text-muted-foreground text-center py-4">
+                        Enter instrument token to load market depth
+                      </p>
+                    )}
+                  </div>
+                </div>
               </div>
             )}
-          </div>
-        </>
-      )}
-    </div>
+            {/* GTT Order Book */}
+            <div className="p-3">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+                  GTT Order Book
+                </p>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    data-ocid="gtt.open_modal_button"
+                    type="button"
+                    onClick={() => setShowGttForm((v) => !v)}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded text-[10px] font-bold transition-colors ${
+                      showGttForm
+                        ? "bg-secondary text-muted-foreground hover:text-foreground"
+                        : "bg-primary text-primary-foreground hover:bg-primary/90"
+                    }`}
+                  >
+                    {showGttForm ? (
+                      <>
+                        <ChevronUp className="w-3 h-3" /> Hide Form
+                      </>
+                    ) : (
+                      <>
+                        <Plus className="w-3 h-3" /> New GTT Order
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={fetchGTTOrders}
+                    className="w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground"
+                  >
+                    <RefreshCw
+                      className={`w-3 h-3 ${gttLoading ? "animate-spin" : ""}`}
+                    />
+                  </button>
+                </div>
+              </div>
+
+              {/* GTT Filter tabs */}
+              <div className="flex gap-1 mb-2 overflow-x-auto hide-scrollbar">
+                {(["ALL", "OPEN", "TRIGGERED", "CANCELLED"] as const).map(
+                  (f) => (
+                    <button
+                      key={f}
+                      type="button"
+                      data-ocid={`gtt.filter.${f.toLowerCase()}.tab`}
+                      onClick={() => setGttStatusFilter(f)}
+                      className={`flex-none px-2.5 py-1 rounded text-[10px] font-bold whitespace-nowrap transition-colors ${
+                        gttStatusFilter === f
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-secondary text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {f}
+                    </button>
+                  ),
+                )}
+              </div>
+
+              {gttLoading && gttOrders.length === 0 ? (
+                <div className="space-y-1.5">
+                  {[1, 2, 3].map((i) => (
+                    <div
+                      key={i}
+                      className="h-8 rounded bg-secondary animate-pulse"
+                    />
+                  ))}
+                </div>
+              ) : gttOrders.length === 0 ? (
+                <div data-ocid="gtt.empty_state" className="py-8 text-center">
+                  <p className="text-xs text-muted-foreground">No GTT orders</p>
+                  <p className="text-[10px] text-muted-foreground mt-1">
+                    Use the form above to place a GTT order
+                  </p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table
+                    className="w-full text-xs border-collapse min-w-[520px]"
+                    data-ocid="gtt.table"
+                  >
+                    <thead>
+                      <tr className="border-b border-border">
+                        <th className="py-1.5 px-2 text-left text-[10px] text-muted-foreground font-semibold tracking-wider">
+                          SYMBOL
+                        </th>
+                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
+                          B/S
+                        </th>
+                        <th className="py-1.5 px-2 text-right text-[10px] text-muted-foreground font-semibold tracking-wider">
+                          QTY
+                        </th>
+                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
+                          ENTRY
+                        </th>
+                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
+                          TGT
+                        </th>
+                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
+                          SL
+                        </th>
+                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
+                          STATUS
+                        </th>
+                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
+                          ACT
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {gttOrders
+                        .filter((gtt) => {
+                          const s = (gtt.status || "").toUpperCase();
+                          if (gttStatusFilter === "ALL") return true;
+                          if (gttStatusFilter === "OPEN")
+                            return ["OPEN", "ACTIVE", "PENDING"].includes(s);
+                          if (gttStatusFilter === "TRIGGERED")
+                            return ["TRIGGERED", "COMPLETE", "FILLED"].includes(
+                              s,
+                            );
+                          if (gttStatusFilter === "CANCELLED")
+                            return s === "CANCELLED";
+                          return true;
+                        })
+                        .map((gtt, i) => {
+                          const entryRule = (gtt.rules || []).find(
+                            (r: any) => r.strategy === "ENTRY",
+                          );
+                          const tgtRule = (gtt.rules || []).find(
+                            (r: any) => r.strategy === "TARGET",
+                          );
+                          const slRule = (gtt.rules || []).find(
+                            (r: any) => r.strategy === "STOPLOSS",
+                          );
+                          const symbol =
+                            (gtt.instrument_token || gtt.tradingsymbol || "—")
+                              .split("|")
+                              .pop() || "—";
+                          return (
+                            <React.Fragment
+                              key={gtt.gtt_order_id || gtt.id || String(i)}
+                            >
+                              <tr
+                                data-ocid={`gtt.row.${i + 1}`}
+                                className="border-b border-border/50 hover:bg-secondary/40 transition-colors"
+                              >
+                                <td className="py-1.5 px-2">
+                                  <p className="font-mono font-bold text-foreground text-xs">
+                                    {symbol}
+                                  </p>
+                                </td>
+                                <td className="py-1.5 px-2 text-center">
+                                  <span
+                                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                                      gtt.transaction_type === "BUY"
+                                        ? "bg-blue-950 text-blue-400 border border-blue-800/40"
+                                        : "bg-red-950 text-red-400 border border-red-800/40"
+                                    }`}
+                                  >
+                                    {gtt.transaction_type === "BUY" ? "B" : "S"}
+                                  </span>
+                                </td>
+                                <td className="py-1.5 px-2 text-right font-mono text-foreground">
+                                  {gtt.quantity}
+                                </td>
+                                <td className="py-1.5 px-2 text-center">
+                                  {entryRule ? (
+                                    <span className="text-[9px] px-1 py-0.5 rounded bg-blue-950 text-blue-400 border border-blue-800/40 font-mono">
+                                      E:{entryRule.trigger_price}
+                                    </span>
+                                  ) : (
+                                    <span className="text-muted-foreground">
+                                      —
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-1.5 px-2 text-center">
+                                  {tgtRule ? (
+                                    <span className="text-[9px] px-1 py-0.5 rounded bg-green-950 text-green-400 border border-green-800/40 font-mono">
+                                      T:{tgtRule.trigger_price}
+                                    </span>
+                                  ) : (
+                                    <span className="text-muted-foreground">
+                                      —
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-1.5 px-2 text-center">
+                                  {slRule ? (
+                                    <span className="text-[9px] px-1 py-0.5 rounded bg-red-950 text-red-400 border border-red-800/40 font-mono">
+                                      SL:{slRule.trigger_price}
+                                      {slRule.trailing_gap
+                                        ? `(T${slRule.trailing_gap})`
+                                        : ""}
+                                    </span>
+                                  ) : (
+                                    <span className="text-muted-foreground">
+                                      —
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-1.5 px-2 text-center">
+                                  <span
+                                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${statusBadge((gtt.status || "").toUpperCase())}`}
+                                  >
+                                    {gtt.status || "ACTIVE"}
+                                  </span>
+                                </td>
+                                <td className="py-1.5 px-2 text-center">
+                                  <div className="flex items-center justify-center gap-1">
+                                    <button
+                                      type="button"
+                                      data-ocid={`gtt.edit_button.${i + 1}`}
+                                      onClick={() => startEditGTT(gtt)}
+                                      title="Edit GTT"
+                                      className="w-5 h-5 flex items-center justify-center rounded bg-secondary hover:bg-amber-900/40 text-amber-400 transition-colors"
+                                    >
+                                      <Pencil className="w-2.5 h-2.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      data-ocid={`gtt.cancel_button.${i + 1}`}
+                                      onClick={() =>
+                                        setCancelConfirm({
+                                          orderId: gtt.gtt_order_id || gtt.id,
+                                          type: "gtt",
+                                        })
+                                      }
+                                      title="Cancel GTT"
+                                      className="w-5 h-5 flex items-center justify-center rounded bg-secondary hover:bg-red-900/40 text-red-400 transition-colors"
+                                    >
+                                      <X className="w-2.5 h-2.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      data-ocid={`gtt.depth_button.${i + 1}`}
+                                      onClick={() =>
+                                        toggleGttRowDepth(
+                                          gtt.gtt_order_id ||
+                                            gtt.id ||
+                                            String(i),
+                                          gtt.instrument_token || "",
+                                        )
+                                      }
+                                      title="Market Depth"
+                                      className={`w-5 h-5 flex items-center justify-center rounded transition-colors ${gttRowDepthOpen.has(gtt.gtt_order_id || gtt.id || String(i)) ? "bg-blue-900/40 text-blue-400" : "bg-secondary text-muted-foreground hover:text-foreground"}`}
+                                    >
+                                      <BarChart2 className="w-2.5 h-2.5" />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                              {gttRowDepthOpen.has(
+                                gtt.gtt_order_id || gtt.id || String(i),
+                              ) && (
+                                <tr
+                                  data-ocid={`gtt.depth.panel.${i + 1}`}
+                                  className="border-b border-border/30 bg-secondary/20"
+                                >
+                                  <td colSpan={8} className="px-3 py-2">
+                                    <div className="flex items-center justify-between mb-1.5">
+                                      <p className="text-[9px] font-bold text-muted-foreground uppercase tracking-widest">
+                                        Market Depth —{" "}
+                                        {(gtt.instrument_token || "—")
+                                          .split("|")
+                                          .pop()}
+                                      </p>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          fetchGttRowDepth(
+                                            gtt.gtt_order_id ||
+                                              gtt.id ||
+                                              String(i),
+                                            gtt.instrument_token || "",
+                                          )
+                                        }
+                                        className="text-[9px] text-muted-foreground hover:text-foreground flex items-center gap-1"
+                                        title="Refresh depth"
+                                      >
+                                        <RefreshCw className="w-2.5 h-2.5" />{" "}
+                                        Refresh
+                                      </button>
+                                    </div>
+                                    {gttRowDepthData[
+                                      gtt.gtt_order_id || gtt.id || String(i)
+                                    ] ? (
+                                      <DepthRows
+                                        depth={
+                                          gttRowDepthData[
+                                            gtt.gtt_order_id ||
+                                              gtt.id ||
+                                              String(i)
+                                          ]!
+                                        }
+                                      />
+                                    ) : (
+                                      <p className="text-[10px] text-muted-foreground text-center py-2">
+                                        Loading depth…
+                                      </p>
+                                    )}
+                                  </td>
+                                </tr>
+                              )}
+                            </React.Fragment>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+      <AlertDialog
+        open={!!cancelConfirm}
+        onOpenChange={(open) => {
+          if (!open) setCancelConfirm(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Cancel Order?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to cancel order{" "}
+              <span className="font-semibold text-foreground">
+                {cancelConfirm?.orderId}
+              </span>
+              ? This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              data-ocid="cancel_order.cancel_button"
+              onClick={() => setCancelConfirm(null)}
+            >
+              No, Keep
+            </AlertDialogCancel>
+            <AlertDialogAction
+              data-ocid="cancel_order.confirm_button"
+              className="bg-red-600 hover:bg-red-500 text-white"
+              onClick={() => {
+                if (!cancelConfirm) return;
+                if (cancelConfirm.type === "regular") {
+                  cancelRegularOrder(cancelConfirm.orderId);
+                } else {
+                  cancelGTTOrder(cancelConfirm.orderId);
+                }
+                setCancelConfirm(null);
+              }}
+            >
+              Yes, Cancel
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }
 
 // ─── Positions Tab ─────────────────────────────────────────────────────────────
-function PositionsTab({ token }: { token: string }) {
+function PositionsTab({
+  token,
+  onSquareOff,
+}: {
+  token: string;
+  onSquareOff?: (pos: Position, mode: "sell" | "gtt") => void;
+}) {
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(false);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
@@ -3029,13 +3592,26 @@ function PositionsTab({ token }: { token: string }) {
     localStorage.setItem(RISK_SETTINGS_KEY, JSON.stringify(next));
   };
 
+  const fixAvgPrice = (pos: Position): Position => {
+    if (pos.average_price && pos.average_price !== 0) return pos;
+    if (pos.quantity > 0 && pos.buy_quantity > 0)
+      return { ...pos, average_price: pos.buy_value / pos.buy_quantity };
+    if (pos.quantity < 0 && pos.sell_quantity > 0)
+      return { ...pos, average_price: pos.sell_value / pos.sell_quantity };
+    if (pos.buy_quantity > 0)
+      return { ...pos, average_price: pos.buy_value / pos.buy_quantity };
+    return pos;
+  };
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: fixAvgPrice is stable
   const fetchPositions = useCallback(async () => {
     setLoading(true);
     const res = await upstoxFetch<Position[]>(
       "/v2/portfolio/short-term-positions",
       token,
     );
-    if (res.data) setPositions(Array.isArray(res.data) ? res.data : []);
+    if (res.data)
+      setPositions((Array.isArray(res.data) ? res.data : []).map(fixAvgPrice));
     else if (res.error) toast.error(`Positions: ${res.error}`);
     setLoading(false);
   }, [token]);
@@ -3122,125 +3698,147 @@ function PositionsTab({ token }: { token: string }) {
                 </th>
               </tr>
             </thead>
-            <tbody>
-              {positions.map((pos, i) => {
-                const pnlPct =
-                  pos.average_price > 0
-                    ? (pos.pnl / (pos.average_price * Math.abs(pos.quantity))) *
-                      100
-                    : 0;
-                const posSettings = riskSettings[pos.tradingsymbol] ?? {
-                  sl: "",
-                  tsl: "",
-                };
-                return (
-                  <tbody key={`${pos.tradingsymbol}-${i}`}>
-                    <tr
-                      data-ocid={`positions.row.${i + 1}`}
-                      className="border-b border-border/50 hover:bg-secondary/40 transition-colors cursor-pointer"
-                      onClick={() =>
+            {positions.map((pos, i) => {
+              const pnlPct =
+                pos.average_price > 0
+                  ? (pos.pnl / (pos.average_price * Math.abs(pos.quantity))) *
+                    100
+                  : 0;
+              const posSettings = riskSettings[pos.tradingsymbol] ?? {
+                sl: "",
+                tsl: "",
+              };
+              return (
+                <tbody key={`${pos.tradingsymbol}-${i}`}>
+                  <tr
+                    data-ocid={`positions.row.${i + 1}`}
+                    className="border-b border-border/50 hover:bg-secondary/40 transition-colors cursor-pointer"
+                    onClick={() =>
+                      setExpandedRow(
+                        expandedRow === pos.tradingsymbol
+                          ? null
+                          : pos.tradingsymbol,
+                      )
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter")
                         setExpandedRow(
                           expandedRow === pos.tradingsymbol
                             ? null
                             : pos.tradingsymbol,
-                        )
-                      }
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter")
-                          setExpandedRow(
-                            expandedRow === pos.tradingsymbol
-                              ? null
-                              : pos.tradingsymbol,
-                          );
-                      }}
-                    >
-                      <td className="py-2 px-3">
-                        <div className="flex items-center gap-2">
-                          <div
-                            className={`w-2 h-2 rounded-full flex-none ${pnlPct >= 0 ? "bg-green-500" : pnlPct >= -5 ? "bg-amber-400" : "bg-red-500"}`}
-                          />
+                        );
+                    }}
+                  >
+                    <td className="py-2 px-3">
+                      <div className="flex items-center gap-2">
+                        <div
+                          className={`w-2 h-2 rounded-full flex-none ${pnlPct >= 0 ? "bg-green-500" : pnlPct >= -5 ? "bg-amber-400" : "bg-red-500"}`}
+                        />
+                        <div>
+                          <p className="font-mono font-bold text-foreground">
+                            {pos.tradingsymbol}
+                          </p>
+                          <p className="text-[10px] text-muted-foreground">
+                            {pos.exchange} · {pos.product}
+                          </p>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="py-2 px-3 text-right font-mono-data font-bold text-foreground">
+                      {pos.quantity}
+                    </td>
+                    <td className="py-2 px-3 text-right font-mono-data text-foreground">
+                      ₹{pos.average_price.toFixed(2)}
+                    </td>
+                    <td className="py-2 px-3 text-right font-mono-data text-foreground">
+                      ₹{pos.last_price.toFixed(2)}
+                    </td>
+                    <td className="py-2 px-3 text-right">
+                      <PnlText value={pos.pnl} />
+                    </td>
+                    <td className="py-2 px-3 text-right">
+                      <PnlPct value={pnlPct} />
+                    </td>
+                  </tr>
+                  {expandedRow === pos.tradingsymbol && (
+                    <tr>
+                      <td
+                        colSpan={6}
+                        className="px-4 py-3 border-b border-border/50"
+                        style={{ background: "oklch(var(--card))" }}
+                      >
+                        <div className="grid grid-cols-2 gap-3">
                           <div>
-                            <p className="font-mono font-bold text-foreground">
-                              {pos.tradingsymbol}
-                            </p>
-                            <p className="text-[10px] text-muted-foreground">
-                              {pos.exchange} · {pos.product}
-                            </p>
+                            <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                              Stop Loss ₹
+                            </Label>
+                            <Input
+                              data-ocid={`positions.sl_input.${i + 1}`}
+                              type="number"
+                              placeholder="0.00"
+                              value={posSettings.sl}
+                              onChange={(e) =>
+                                saveRowSettings(
+                                  pos.tradingsymbol,
+                                  e.target.value,
+                                  posSettings.tsl,
+                                )
+                              }
+                              className="h-7 mt-1 bg-secondary border-border font-mono-data text-xs"
+                              onClick={(ev) => ev.stopPropagation()}
+                            />
+                          </div>
+                          <div>
+                            <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                              Trail SL %
+                            </Label>
+                            <Input
+                              data-ocid={`positions.tsl_input.${i + 1}`}
+                              type="number"
+                              placeholder="0.0"
+                              value={posSettings.tsl}
+                              onChange={(e) =>
+                                saveRowSettings(
+                                  pos.tradingsymbol,
+                                  posSettings.sl,
+                                  e.target.value,
+                                )
+                              }
+                              className="h-7 mt-1 bg-secondary border-border font-mono-data text-xs"
+                              onClick={(ev) => ev.stopPropagation()}
+                            />
                           </div>
                         </div>
-                      </td>
-                      <td className="py-2 px-3 text-right font-mono-data font-bold text-foreground">
-                        {pos.quantity}
-                      </td>
-                      <td className="py-2 px-3 text-right font-mono-data text-foreground">
-                        ₹{pos.average_price.toFixed(2)}
-                      </td>
-                      <td className="py-2 px-3 text-right font-mono-data text-foreground">
-                        ₹{pos.last_price.toFixed(2)}
-                      </td>
-                      <td className="py-2 px-3 text-right">
-                        <PnlText value={pos.pnl} />
-                      </td>
-                      <td className="py-2 px-3 text-right">
-                        <PnlPct value={pnlPct} />
+                        {pos.quantity !== 0 && (
+                          <div
+                            className="flex gap-2 mt-3"
+                            onClick={(ev) => ev.stopPropagation()}
+                            onKeyDown={(ev) => ev.stopPropagation()}
+                          >
+                            <button
+                              type="button"
+                              data-ocid={`positions.squareoff.${i + 1}`}
+                              onClick={() => onSquareOff?.(pos, "sell")}
+                              className="flex-1 h-8 rounded text-[11px] font-bold bg-red-600 hover:bg-red-500 text-white transition-colors"
+                            >
+                              Square Off (SELL)
+                            </button>
+                            <button
+                              type="button"
+                              data-ocid={`positions.gtt_squareoff.${i + 1}`}
+                              onClick={() => onSquareOff?.(pos, "gtt")}
+                              className="flex-1 h-8 rounded text-[11px] font-bold bg-amber-600 hover:bg-amber-500 text-white transition-colors"
+                            >
+                              GTT Square Off
+                            </button>
+                          </div>
+                        )}
                       </td>
                     </tr>
-                    {expandedRow === pos.tradingsymbol && (
-                      <tr>
-                        <td
-                          colSpan={6}
-                          className="px-4 py-3 border-b border-border/50"
-                          style={{ background: "oklch(var(--card))" }}
-                        >
-                          <div className="grid grid-cols-2 gap-3">
-                            <div>
-                              <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                                Stop Loss ₹
-                              </Label>
-                              <Input
-                                data-ocid={`positions.sl_input.${i + 1}`}
-                                type="number"
-                                placeholder="0.00"
-                                value={posSettings.sl}
-                                onChange={(e) =>
-                                  saveRowSettings(
-                                    pos.tradingsymbol,
-                                    e.target.value,
-                                    posSettings.tsl,
-                                  )
-                                }
-                                className="h-7 mt-1 bg-secondary border-border font-mono-data text-xs"
-                                onClick={(ev) => ev.stopPropagation()}
-                              />
-                            </div>
-                            <div>
-                              <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                                Trail SL %
-                              </Label>
-                              <Input
-                                data-ocid={`positions.tsl_input.${i + 1}`}
-                                type="number"
-                                placeholder="0.0"
-                                value={posSettings.tsl}
-                                onChange={(e) =>
-                                  saveRowSettings(
-                                    pos.tradingsymbol,
-                                    posSettings.sl,
-                                    e.target.value,
-                                  )
-                                }
-                                className="h-7 mt-1 bg-secondary border-border font-mono-data text-xs"
-                                onClick={(ev) => ev.stopPropagation()}
-                              />
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                );
-              })}
-            </tbody>
+                  )}
+                </tbody>
+              );
+            })}
           </table>
         </div>
       )}
@@ -3249,8 +3847,15 @@ function PositionsTab({ token }: { token: string }) {
 }
 
 // ─── Holdings Tab ──────────────────────────────────────────────────────────────
-function HoldingsTab({ token }: { token: string }) {
+function HoldingsTab({
+  token,
+  onSquareOff,
+}: {
+  token: string;
+  onSquareOff?: (h: Holding, mode: "sell" | "gtt") => void;
+}) {
   const [holdings, setHoldings] = useState<Holding[]>([]);
+  const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const fetchHoldings = useCallback(async () => {
@@ -3378,25 +3983,40 @@ function HoldingsTab({ token }: { token: string }) {
                 </th>
               </tr>
             </thead>
-            <tbody>
-              {holdings.map((h, i) => {
-                const curVal = h.last_price * h.quantity;
-                const inv = h.average_price * h.quantity;
-                const pnl = curVal - inv;
-                const pnlPct = inv > 0 ? (pnl / inv) * 100 : 0;
-                return (
+            {holdings.map((h, i) => {
+              const curVal = h.last_price * h.quantity;
+              const inv = h.average_price * h.quantity;
+              const pnl = curVal - inv;
+              const pnlPct = inv > 0 ? (pnl / inv) * 100 : 0;
+              const rowKey = h.isin ?? h.tradingsymbol;
+              const isExpanded = expandedRow === rowKey;
+              const _instrumentKey =
+                h.instrument_token || `${h.exchange}_EQ|${h.tradingsymbol}`;
+              return (
+                <tbody key={rowKey}>
                   <tr
-                    key={h.isin ?? h.tradingsymbol}
                     data-ocid={`holdings.row.${i + 1}`}
-                    className="border-b border-border/50 hover:bg-secondary/40 transition-colors"
+                    className="border-b border-border/50 hover:bg-secondary/40 transition-colors cursor-pointer"
+                    onClick={() => setExpandedRow(isExpanded ? null : rowKey)}
+                    onKeyDown={(e) =>
+                      e.key === "Enter" &&
+                      setExpandedRow(isExpanded ? null : rowKey)
+                    }
                   >
                     <td className="py-2 px-3">
-                      <p className="font-mono font-bold text-foreground">
-                        {h.tradingsymbol}
-                      </p>
-                      <p className="text-[10px] text-muted-foreground">
-                        {h.exchange}
-                      </p>
+                      <div className="flex items-center gap-1">
+                        <ChevronRight
+                          className={`w-3 h-3 text-muted-foreground transition-transform ${isExpanded ? "rotate-90" : ""}`}
+                        />
+                        <div>
+                          <p className="font-mono font-bold text-foreground">
+                            {h.tradingsymbol}
+                          </p>
+                          <p className="text-[10px] text-muted-foreground">
+                            {h.exchange}
+                          </p>
+                        </div>
+                      </div>
                     </td>
                     <td className="py-2 px-3 text-right font-mono-data text-foreground">
                       {h.quantity}
@@ -3420,9 +4040,37 @@ function HoldingsTab({ token }: { token: string }) {
                       <PnlPct value={pnlPct} />
                     </td>
                   </tr>
-                );
-              })}
-            </tbody>
+                  {isExpanded && (
+                    <tr className="border-b border-border/50 bg-secondary/20">
+                      <td colSpan={7} className="py-2 px-4">
+                        <div
+                          className="flex gap-2"
+                          onClick={(ev) => ev.stopPropagation()}
+                          onKeyDown={(ev) => ev.stopPropagation()}
+                        >
+                          <button
+                            type="button"
+                            data-ocid={`holdings.squareoff.${i + 1}`}
+                            onClick={() => onSquareOff?.(h, "sell")}
+                            className="flex-1 h-8 rounded text-[11px] font-bold bg-red-600 hover:bg-red-500 text-white transition-colors"
+                          >
+                            Square Off (SELL)
+                          </button>
+                          <button
+                            type="button"
+                            data-ocid={`holdings.gtt_squareoff.${i + 1}`}
+                            onClick={() => onSquareOff?.(h, "gtt")}
+                            className="flex-1 h-8 rounded text-[11px] font-bold bg-amber-600 hover:bg-amber-500 text-white transition-colors"
+                          >
+                            GTT Square Off
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              );
+            })}
           </table>
         </div>
       )}
@@ -3446,13 +4094,27 @@ function RiskTab({ token }: { token: string }) {
     }
   });
 
+  const fixAvgPriceLocal = (pos: Position): Position => {
+    if (pos.average_price && pos.average_price !== 0) return pos;
+    if (pos.quantity > 0 && pos.buy_quantity > 0)
+      return { ...pos, average_price: pos.buy_value / pos.buy_quantity };
+    if (pos.quantity < 0 && pos.sell_quantity > 0)
+      return { ...pos, average_price: pos.sell_value / pos.sell_quantity };
+    if (pos.buy_quantity > 0)
+      return { ...pos, average_price: pos.buy_value / pos.buy_quantity };
+    return pos;
+  };
+  // biome-ignore lint/correctness/useExhaustiveDependencies: fixAvgPriceLocal is stable
   const fetchPositions = useCallback(async () => {
     setLoading(true);
     const res = await upstoxFetch<Position[]>(
       "/v2/portfolio/short-term-positions",
       token,
     );
-    if (res.data) setPositions(Array.isArray(res.data) ? res.data : []);
+    if (res.data)
+      setPositions(
+        (Array.isArray(res.data) ? res.data : []).map(fixAvgPriceLocal),
+      );
     else if (res.error) toast.error(`Risk Monitor: ${res.error}`);
     setLoading(false);
   }, [token]);
@@ -3730,6 +4392,7 @@ function TrendAnalysisPanel({
   greeksData,
   expanded = true,
   onToggleExpanded,
+  onSignalReady,
 }: {
   chain: OptionData[];
   underlyingLtp: number;
@@ -3748,8 +4411,11 @@ function TrendAnalysisPanel({
   >;
   expanded?: boolean;
   onToggleExpanded?: () => void;
+  onSignalReady?: (
+    signal: Omit<GeneratedSignal, "id" | "timestamp" | "date" | "status">,
+  ) => void;
 }) {
-  if (chain.length === 0) return null;
+  const [reasoningOpen, setReasoningOpen] = useState(false);
 
   // ── OI totals ──────────────────────────────────────────────────────────────
   const totalCE_OI = chain.reduce(
@@ -3824,6 +4490,22 @@ function TrendAnalysisPanel({
     return total > bestTotal ? r : best;
   }, chain[0]);
 
+  // ── OI Concentration (top 3 by OI) ──────────────────────────────────────
+  const top3CeOI = [...chain]
+    .sort(
+      (a, b) =>
+        (b.call_options?.market_data?.oi ?? 0) -
+        (a.call_options?.market_data?.oi ?? 0),
+    )
+    .slice(0, 3);
+  const top3PeOI = [...chain]
+    .sort(
+      (a, b) =>
+        (b.put_options?.market_data?.oi ?? 0) -
+        (a.put_options?.market_data?.oi ?? 0),
+    )
+    .slice(0, 3);
+
   // ── Multi-signal trend determination ──────────────────────────────────────
   let bullSignals = 0;
   let bearSignals = 0;
@@ -3846,24 +4528,38 @@ function TrendAnalysisPanel({
 
   // Signal 5: Greeks-based delta momentum
   if (greeksData && atm) {
-    const atmCeKey = atm.call_options?.instrument_key;
-    const atmCeDelta = atmCeKey ? (greeksData[atmCeKey]?.delta ?? 0) : 0;
+    const atmCeKey5 = atm.call_options?.instrument_key;
+    const atmCeDelta = atmCeKey5 ? (greeksData[atmCeKey5]?.delta ?? 0) : 0;
     if (atmCeDelta > 0.52) bullSignals++;
     else if (atmCeDelta < 0.48 && atmCeDelta !== 0) bearSignals++;
+  }
+
+  // Signal 6: OI buildup — if majority of top 3 CE OI strikes above ATM = bullish
+  const ceAboveAtm = atm
+    ? top3CeOI.filter((r) => r.strike_price > atm.strike_price).length
+    : 0;
+  const peBelowAtm = atm
+    ? top3PeOI.filter((r) => r.strike_price < atm.strike_price).length
+    : 0;
+  if (ceAboveAtm >= 2 && peBelowAtm >= 2) bullSignals++;
+  else if (ceAboveAtm <= 1 || peBelowAtm <= 1) bearSignals++;
+
+  // Signal 7: IV skew
+  if (greeksData && atm) {
+    const ceKeyS7 = atm.call_options?.instrument_key;
+    const peKeyS7 = atm.put_options?.instrument_key;
+    const ceIV_s7 = ceKeyS7 ? (greeksData[ceKeyS7]?.iv ?? 0) : 0;
+    const peIV_s7 = peKeyS7 ? (greeksData[peKeyS7]?.iv ?? 0) : 0;
+    if (peIV_s7 - ceIV_s7 > 2) bearSignals++;
+    else if (ceIV_s7 - peIV_s7 > 2) bullSignals++;
   }
 
   const trend =
     bullSignals >= 3 ? "BULLISH" : bearSignals >= 3 ? "BEARISH" : "NEUTRAL";
 
-  // ── Confidence based on signal strength ───────────────────────────────────
-  const signalStrength = Math.abs(bullSignals - bearSignals);
-  const pcrExtreme = PCR > 1.5 || PCR < 0.6;
-  const confidence =
-    signalStrength >= 3 && pcrExtreme
-      ? "HIGH"
-      : signalStrength >= 2
-        ? "MEDIUM"
-        : "LOW";
+  // ── Confidence based on signal strength (8 total signals) ─────────────────
+  const maxSig = Math.max(bullSignals, bearSignals);
+  const confidence = maxSig >= 6 ? "HIGH" : maxSig >= 4 ? "MEDIUM" : "LOW";
 
   // ── Auto-select best strike ────────────────────────────────────────────────
   let recommendedStrike = atm?.strike_price ?? 0;
@@ -3916,6 +4612,130 @@ function TrendAnalysisPanel({
         ? (recRow?.put_options?.market_data?.ltp ?? 0)
         : 0;
 
+  // ── ATM Greeks for display ───────────────────────────────────────────────
+  const atmCeKey = atm?.call_options?.instrument_key ?? "";
+  const atmPeKey = atm?.put_options?.instrument_key ?? "";
+  const atmDeltaVal = greeksData?.[atmCeKey]?.delta ?? null;
+  const atmGamma = greeksData?.[atmCeKey]?.gamma ?? null;
+  const atmTheta = greeksData?.[atmCeKey]?.theta ?? null;
+  const atmVega = greeksData?.[atmCeKey]?.vega ?? null;
+  const atmIV = greeksData?.[atmCeKey]?.iv ?? null;
+  const atmPeIV = greeksData?.[atmPeKey]?.iv ?? null;
+
+  // ── High-conviction signal gate ───────────────────────────────────────────
+  // (must be after atmIV declaration)
+  const isHighConviction =
+    chain.length > 0 &&
+    confidence === "HIGH" &&
+    trend !== "NEUTRAL" &&
+    bullSignals + bearSignals >= 6 &&
+    (atmIV === null || atmIV < 40) &&
+    recLtp > 0;
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional signal fire
+  useEffect(() => {
+    if (!isHighConviction || !onSignalReady || recLtp <= 0) return;
+    const slPct = (tradeSettings?.slPct ?? 25) / 100;
+    const sl = recLtp * (1 - slPct);
+    const risk = recLtp - sl;
+    const tgt1 = recLtp + risk * (tradeSettings?.tgt1RR ?? 2);
+    const tgt2 = recLtp + risk * (tradeSettings?.tgt2RR ?? 3);
+    onSignalReady({
+      instrument: "NIFTY",
+      strike: recommendedStrike,
+      action: trend === "BULLISH" ? "BUY CALL" : "BUY PUT",
+      expiry: autoExpiry,
+      entryPrice: recLtp,
+      sl,
+      tgt1,
+      tgt2,
+      ceInstrumentKey: atm?.call_options?.instrument_key,
+      peInstrumentKey: atm?.put_options?.instrument_key,
+    });
+  }, [isHighConviction, trend, recommendedStrike]); // eslint-disable-line
+
+  // Early return after hooks
+  if (chain.length === 0) return null;
+
+  // Market regime based on IV
+  const marketRegime =
+    atmIV === null
+      ? null
+      : atmIV < 15
+        ? {
+            label: "LOW VOL",
+            cls: "text-blue-300 border-blue-700/40 bg-blue-950/40",
+          }
+        : atmIV < 25
+          ? {
+              label: "NORMAL",
+              cls: "text-green-300 border-green-700/40 bg-green-950/40",
+            }
+          : atmIV < 40
+            ? {
+                label: "HIGH VOL",
+                cls: "text-amber-300 border-amber-700/40 bg-amber-950/40",
+              }
+            : {
+                label: "EXTREME",
+                cls: "text-red-300 border-red-700/40 bg-red-950/40",
+              };
+
+  // Theta decay warning
+  const thetaDecayPct =
+    recLtp > 0 && atmTheta !== null ? (Math.abs(atmTheta) / recLtp) * 100 : 0;
+  const highDecay = thetaDecayPct > 1;
+
+  // Best CE strike (delta closest to 0.45)
+  let bestCeStrike: {
+    strike: number;
+    ltp: number;
+    delta: number;
+    theta: number;
+  } | null = null;
+  if (greeksData) {
+    let closestCe = 999;
+    for (const row of chain) {
+      const key = row.call_options?.instrument_key;
+      if (!key || !greeksData[key]) continue;
+      const d = Math.abs((greeksData[key].delta ?? 0.5) - 0.45);
+      if (d < closestCe) {
+        closestCe = d;
+        bestCeStrike = {
+          strike: row.strike_price,
+          ltp: row.call_options?.market_data?.ltp ?? 0,
+          delta: greeksData[key].delta ?? 0,
+          theta: greeksData[key].theta ?? 0,
+        };
+      }
+    }
+  }
+
+  // Best PE strike (delta closest to -0.45)
+  let bestPeStrike: {
+    strike: number;
+    ltp: number;
+    delta: number;
+    theta: number;
+  } | null = null;
+  if (greeksData) {
+    let closestPe = 999;
+    for (const row of chain) {
+      const key = row.put_options?.instrument_key;
+      if (!key || !greeksData[key]) continue;
+      const d = Math.abs((greeksData[key].delta ?? -0.5) - -0.45);
+      if (d < closestPe) {
+        closestPe = d;
+        bestPeStrike = {
+          strike: row.strike_price,
+          ltp: row.put_options?.market_data?.ltp ?? 0,
+          delta: greeksData[key].delta ?? 0,
+          theta: greeksData[key].theta ?? 0,
+        };
+      }
+    }
+  }
+
   // ── AI reasoning text ─────────────────────────────────────────────────────
   const reasoning: string[] = [];
   if (PCR > 1.2)
@@ -3938,17 +4758,29 @@ function TrendAnalysisPanel({
     `CE resistance at ${maxCeOiRow.strike_price.toLocaleString("en-IN")}, PE support at ${maxPeOiRow.strike_price.toLocaleString("en-IN")} — ${bullSignals} bullish / ${bearSignals} bearish signals.`,
   );
   if (greeksData && atm) {
-    const atmCeKey = atm.call_options?.instrument_key;
-    const atmDelta = atmCeKey ? (greeksData[atmCeKey]?.delta ?? null) : null;
-    const atmIV = atmCeKey ? (greeksData[atmCeKey]?.iv ?? null) : null;
-    if (atmDelta !== null) {
+    if (atmDeltaVal !== null) {
       reasoning.push(
-        `ATM CE Delta: ${atmDelta.toFixed(3)} — ${atmDelta > 0.5 ? "bullish momentum (delta above 0.50)" : "bearish bias (delta below 0.50)"}.`,
+        `ATM CE Delta: ${atmDeltaVal.toFixed(3)} — ${atmDeltaVal > 0.5 ? "bullish momentum (delta above 0.50)" : "bearish bias (delta below 0.50)"}.`,
       );
     }
     if (atmIV !== null) {
       reasoning.push(
         `ATM IV: ${atmIV.toFixed(1)}% — ${atmIV > 25 ? "elevated volatility, option premiums are rich" : "low IV, options are relatively cheap"}.`,
+      );
+    }
+    if (atmIV !== null && atmPeIV !== null && Math.abs(atmPeIV - atmIV) > 1) {
+      reasoning.push(
+        `IV Skew: PE IV ${atmPeIV.toFixed(1)}% vs CE IV ${atmIV.toFixed(1)}% — ${atmPeIV > atmIV ? "downside fear premium present" : "upside demand driving CE premiums"}.`,
+      );
+    }
+    if (atmGamma !== null && atmGamma > 0.003) {
+      reasoning.push(
+        `HIGH GAMMA zone (${atmGamma.toFixed(4)}) — expect explosive moves near ATM, avoid naked option sells.`,
+      );
+    }
+    if (highDecay) {
+      reasoning.push(
+        `Theta decay: ${thetaDecayPct.toFixed(1)}%/day of premium — avoid holding options overnight if theta > 1% per day.`,
       );
     }
   }
@@ -4015,11 +4847,37 @@ function TrendAnalysisPanel({
                     ? "▼ BUY PUT"
                     : "~ NEUTRAL"}
               </span>
-              <span
-                className={`text-[10px] font-bold px-2 py-0.5 rounded border ${confCls}`}
-              >
-                {confidence}
-              </span>
+              <div className="flex items-center gap-1.5 flex-1">
+                <span
+                  className={`text-[10px] font-bold px-2 py-0.5 rounded border shrink-0 ${confCls}`}
+                >
+                  {confidence}
+                </span>
+                {marketRegime && (
+                  <span
+                    className={`text-[9px] font-bold px-1.5 py-0.5 rounded border shrink-0 ${marketRegime.cls}`}
+                  >
+                    {marketRegime.label}
+                  </span>
+                )}
+                <div className="flex-1 h-2 rounded-full overflow-hidden bg-secondary/60 min-w-[40px]">
+                  <div
+                    className="h-full rounded-full transition-all duration-500"
+                    style={{
+                      width: `${Math.round((Math.max(bullSignals, bearSignals) / 8) * 100)}%`,
+                      background:
+                        trend === "BULLISH"
+                          ? "oklch(0.64 0.2 145)"
+                          : trend === "BEARISH"
+                            ? "oklch(0.62 0.22 22)"
+                            : "oklch(0.7 0.05 250)",
+                    }}
+                  />
+                </div>
+                <span className="text-[9px] text-muted-foreground/70 font-mono-data shrink-0">
+                  {trend === "BULLISH" ? bullSignals : bearSignals}/8
+                </span>
+              </div>
               <span className="text-[10px] text-muted-foreground ml-auto">
                 Strike:{" "}
                 <span className="font-mono-data font-bold text-foreground">
@@ -4077,6 +4935,9 @@ function TrendAnalysisPanel({
                       <p className="font-mono-data text-sm font-black text-red-400">
                         ₹{sl.toFixed(2)}
                       </p>
+                      <p className="text-[8px] text-muted-foreground/60 mt-0.5">
+                        R:R 1:{(tradeSettings?.tgt1RR ?? 2).toFixed(1)}
+                      </p>
                     </div>
                     <div className="flex-1 text-center py-2 px-1 border-l border-border">
                       <p className="text-[8px] text-muted-foreground mb-1 uppercase tracking-widest font-semibold">
@@ -4098,10 +4959,203 @@ function TrendAnalysisPanel({
                 );
               })()}
 
-            {/* Compact metrics row with hover tooltip */}
-            <div className="relative group mt-1">
+            {/* Greeks scorecard */}
+            {(atmDeltaVal !== null ||
+              atmGamma !== null ||
+              atmTheta !== null ||
+              atmVega !== null ||
+              atmIV !== null) && (
+              <div className="flex gap-2 flex-wrap mb-2">
+                {atmDeltaVal !== null && (
+                  <div className="flex flex-col items-center bg-secondary/30 rounded px-2 py-1 border border-border/50 min-w-[44px]">
+                    <span className="text-[8px] text-muted-foreground uppercase tracking-wider">
+                      Δ Delta
+                    </span>
+                    <span
+                      className={`text-[11px] font-mono-data font-bold ${action === "BUY CALL" ? (atmDeltaVal > 0.45 ? "text-green-400" : "text-amber-400") : action === "BUY PUT" ? (atmDeltaVal < 0.55 ? "text-green-400" : "text-amber-400") : "text-foreground"}`}
+                    >
+                      {atmDeltaVal.toFixed(3)}
+                    </span>
+                  </div>
+                )}
+                {atmGamma !== null && (
+                  <div className="flex flex-col items-center bg-secondary/30 rounded px-2 py-1 border border-border/50 min-w-[44px]">
+                    <span className="text-[8px] text-muted-foreground uppercase tracking-wider">
+                      Γ Gamma
+                    </span>
+                    <span
+                      className={`text-[11px] font-mono-data font-bold ${atmGamma > 0.003 ? "text-red-400" : "text-foreground"}`}
+                    >
+                      {atmGamma.toFixed(4)}
+                    </span>
+                  </div>
+                )}
+                {atmTheta !== null && (
+                  <div className="flex flex-col items-center bg-secondary/30 rounded px-2 py-1 border border-border/50 min-w-[44px]">
+                    <span className="text-[8px] text-muted-foreground uppercase tracking-wider">
+                      Θ Theta
+                    </span>
+                    <span
+                      className={`text-[11px] font-mono-data font-bold ${highDecay ? "text-red-400" : "text-foreground"}`}
+                    >
+                      {atmTheta.toFixed(2)}
+                    </span>
+                    {highDecay && (
+                      <span className="text-[7px] text-red-400 font-bold">
+                        HIGH DECAY
+                      </span>
+                    )}
+                  </div>
+                )}
+                {atmVega !== null && (
+                  <div className="flex flex-col items-center bg-secondary/30 rounded px-2 py-1 border border-border/50 min-w-[44px]">
+                    <span className="text-[8px] text-muted-foreground uppercase tracking-wider">
+                      ν Vega
+                    </span>
+                    <span className="text-[11px] font-mono-data font-bold text-foreground">
+                      {atmVega.toFixed(2)}
+                    </span>
+                  </div>
+                )}
+                {atmIV !== null && (
+                  <div className="flex flex-col items-center bg-secondary/30 rounded px-2 py-1 border border-border/50 min-w-[44px]">
+                    <span className="text-[8px] text-muted-foreground uppercase tracking-wider">
+                      IV %
+                    </span>
+                    <span
+                      className={`text-[11px] font-mono-data font-bold ${atmIV > 40 ? "text-red-400" : atmIV > 25 ? "text-amber-400" : "text-green-400"}`}
+                    >
+                      {atmIV.toFixed(1)}%
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Best Strike Suggestions */}
+            {(bestCeStrike || bestPeStrike) && (
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                {bestCeStrike && (
+                  <div className="rounded border border-green-800/40 bg-green-950/20 p-2">
+                    <p className="text-[8px] text-muted-foreground uppercase tracking-wider mb-1">
+                      Best CE Entry
+                    </p>
+                    <p className="font-mono-data text-sm font-bold text-green-300">
+                      {bestCeStrike.strike.toLocaleString("en-IN")}
+                    </p>
+                    <div className="flex gap-2 mt-1">
+                      <span className="text-[9px] text-muted-foreground">
+                        ₹{bestCeStrike.ltp.toFixed(2)}
+                      </span>
+                      <span className="text-[9px] text-muted-foreground">
+                        Δ {bestCeStrike.delta.toFixed(3)}
+                      </span>
+                      <span className="text-[9px] text-muted-foreground">
+                        Θ {bestCeStrike.theta.toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+                )}
+                {bestPeStrike && (
+                  <div className="rounded border border-red-800/40 bg-red-950/20 p-2">
+                    <p className="text-[8px] text-muted-foreground uppercase tracking-wider mb-1">
+                      Best PE Entry
+                    </p>
+                    <p className="font-mono-data text-sm font-bold text-red-300">
+                      {bestPeStrike.strike.toLocaleString("en-IN")}
+                    </p>
+                    <div className="flex gap-2 mt-1">
+                      <span className="text-[9px] text-muted-foreground">
+                        ₹{bestPeStrike.ltp.toFixed(2)}
+                      </span>
+                      <span className="text-[9px] text-muted-foreground">
+                        Δ {bestPeStrike.delta.toFixed(3)}
+                      </span>
+                      <span className="text-[9px] text-muted-foreground">
+                        Θ {bestPeStrike.theta.toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* OI Concentration bars */}
+            <div className="mb-2">
+              <p className="text-[8px] text-muted-foreground uppercase tracking-wider mb-1">
+                OI Concentration
+              </p>
+              <div className="space-y-1">
+                {top3CeOI.slice(0, 3).map((r) => {
+                  const oi = r.call_options?.market_data?.oi ?? 0;
+                  const maxOI = top3CeOI[0]
+                    ? (top3CeOI[0].call_options?.market_data?.oi ?? 1)
+                    : 1;
+                  return (
+                    <div
+                      key={`ce-oi-${r.strike_price}`}
+                      className="flex items-center gap-2"
+                    >
+                      <span className="text-[9px] text-red-300 font-mono-data w-14 text-right shrink-0">
+                        {r.strike_price.toLocaleString("en-IN")}
+                      </span>
+                      <div className="flex-1 h-1.5 bg-secondary/40 rounded-full overflow-hidden">
+                        <div
+                          className="h-full rounded-full"
+                          style={{
+                            width: `${(oi / maxOI) * 100}%`,
+                            background: "oklch(0.62 0.22 22 / 0.7)",
+                          }}
+                        />
+                      </div>
+                      <span className="text-[8px] text-muted-foreground/60 w-12 shrink-0">
+                        {(oi / 100000).toFixed(1)}L CE
+                      </span>
+                    </div>
+                  );
+                })}
+                {top3PeOI.slice(0, 3).map((r) => {
+                  const oi = r.put_options?.market_data?.oi ?? 0;
+                  const maxOI = top3PeOI[0]
+                    ? (top3PeOI[0].put_options?.market_data?.oi ?? 1)
+                    : 1;
+                  return (
+                    <div
+                      key={`pe-oi-${r.strike_price}`}
+                      className="flex items-center gap-2"
+                    >
+                      <span className="text-[9px] text-green-300 font-mono-data w-14 text-right shrink-0">
+                        {r.strike_price.toLocaleString("en-IN")}
+                      </span>
+                      <div className="flex-1 h-1.5 bg-secondary/40 rounded-full overflow-hidden">
+                        <div
+                          className="h-full rounded-full"
+                          style={{
+                            width: `${(oi / maxOI) * 100}%`,
+                            background: "oklch(0.64 0.2 145 / 0.7)",
+                          }}
+                        />
+                      </div>
+                      <span className="text-[8px] text-muted-foreground/60 w-12 shrink-0">
+                        {(oi / 100000).toFixed(1)}L PE
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Compact metrics row with tap/hover tooltip */}
+            <div
+              className="relative mt-1 cursor-pointer"
+              onClick={() => setReasoningOpen((v) => !v)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ")
+                  setReasoningOpen((v) => !v);
+              }}
+            >
               {/* Compact metrics — always visible */}
-              <div className="flex gap-3 flex-wrap text-[10px] cursor-default">
+              <div className="flex gap-3 flex-wrap text-[10px] cursor-pointer">
                 <span className="text-muted-foreground">
                   PCR{" "}
                   <span className="font-mono-data text-foreground">
@@ -4133,28 +5187,25 @@ function TrendAnalysisPanel({
                   </span>
                 </span>
                 <span className="text-[9px] text-muted-foreground/40 italic ml-auto">
-                  hover for details
+                  tap/hover for analysis
                 </span>
               </div>
               {/* Hover tooltip — full reasoning */}
               <div
-                className="absolute left-0 top-full mt-1 z-50 w-full invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-opacity duration-150 p-2 rounded-md border border-border shadow-xl space-y-1"
+                className={`absolute left-0 top-full mt-1 z-50 w-full p-2 rounded-md border border-border shadow-xl space-y-1 ${reasoningOpen ? "visible opacity-100" : "invisible opacity-0"} hover:visible hover:opacity-100 transition-opacity duration-150`}
                 style={{ background: "oklch(0.13 0.012 250)" }}
               >
-                {[
-                  ["📊", reasoning[0]],
-                  ["🎯", reasoning[1]],
-                  ["📈", reasoning[2]],
-                ].map(([icon, line]) =>
-                  line ? (
+                {reasoning.map((line, i) => {
+                  const icons = ["📊", "🎯", "📈", "📉", "⚡", "🔥", "⚠️"];
+                  return line ? (
                     <p
-                      key={icon as string}
+                      key={line.slice(0, 30)}
                       className="text-[10px] text-muted-foreground leading-relaxed"
                     >
-                      {icon} {line}
+                      {icons[i] ?? "•"} {line}
                     </p>
-                  ) : null,
-                )}
+                  ) : null;
+                })}
               </div>
             </div>
           </div>
@@ -4855,6 +5906,277 @@ const OptionChainHeader = memo(function OptionChainHeader() {
   );
 });
 
+function SignalMonitorPanel({
+  signals,
+  expanded,
+  onToggleExpanded,
+  onClear,
+  chain,
+}: {
+  signals: GeneratedSignal[];
+  expanded: boolean;
+  onToggleExpanded: () => void;
+  onClear: () => void;
+  chain: OptionData[];
+}) {
+  const totalSignals = signals.length;
+  const activeSignals = signals.filter((s) => s.status === "ACTIVE").length;
+  const winSignals = signals.filter(
+    (s) => s.status === "TARGET1_HIT" || s.status === "TARGET2_HIT",
+  ).length;
+  const slSignals = signals.filter((s) => s.status === "SL_HIT").length;
+  const closedSignals = totalSignals - activeSignals;
+  const winPct =
+    closedSignals > 0 ? Math.round((winSignals / closedSignals) * 100) : 0;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const todayCount = signals.filter((s) => s.date === today).length;
+
+  const statusConfig = {
+    ACTIVE: {
+      label: "ACTIVE",
+      cls: "bg-amber-900/50 text-amber-300 border-amber-700/40",
+    },
+    TARGET1_HIT: {
+      label: "TGT1 ✓",
+      cls: "bg-green-900/50 text-green-300 border-green-700/40",
+    },
+    TARGET2_HIT: {
+      label: "TGT2 ✓✓",
+      cls: "bg-emerald-900/50 text-emerald-300 border-emerald-700/40",
+    },
+    SL_HIT: {
+      label: "SL HIT",
+      cls: "bg-red-900/50 text-red-300 border-red-700/40",
+    },
+    EXPIRED: {
+      label: "EXPIRED",
+      cls: "bg-secondary text-muted-foreground border-border",
+    },
+  };
+
+  return (
+    <div
+      className="border-b border-border"
+      style={{ background: "oklch(0.09 0.010 250)" }}
+    >
+      {/* Header */}
+      <div className="flex items-center gap-2 px-3 py-2">
+        <div
+          className={`w-2 h-2 rounded-full ${activeSignals > 0 ? "bg-green-400 animate-pulse" : "bg-muted-foreground/30"}`}
+        />
+        <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+          Signal Monitor
+        </p>
+        <span className="text-[9px] px-1.5 py-0.5 rounded bg-primary/20 text-primary font-mono font-bold border border-primary/30">
+          {todayCount}/3 today
+        </span>
+        <span className="text-[9px] text-muted-foreground/50 ml-auto">
+          Win {winPct}% · {activeSignals} active
+        </span>
+        {signals.length > 0 && (
+          <button
+            type="button"
+            onClick={onClear}
+            className="text-[9px] text-muted-foreground/40 hover:text-red-400 transition-colors px-1"
+          >
+            Clear
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onToggleExpanded}
+          className="p-0.5 rounded hover:bg-secondary/60 transition-colors text-muted-foreground hover:text-foreground"
+        >
+          <ChevronDown
+            className={`w-4 h-4 transition-transform duration-200 ${expanded ? "" : "rotate-90"}`}
+          />
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="px-3 pb-3">
+          {/* Performance summary */}
+          {totalSignals > 0 && (
+            <div className="grid grid-cols-4 gap-2 mb-3">
+              {[
+                { label: "Total", value: totalSignals, cls: "text-foreground" },
+                {
+                  label: "Win %",
+                  value: `${winPct}%`,
+                  cls:
+                    winPct >= 60
+                      ? "text-green-400"
+                      : winPct >= 40
+                        ? "text-amber-400"
+                        : "text-red-400",
+                },
+                {
+                  label: "Active",
+                  value: activeSignals,
+                  cls: "text-amber-300",
+                },
+                {
+                  label: "SL Hit",
+                  value: slSignals,
+                  cls: slSignals > 0 ? "text-red-400" : "text-muted-foreground",
+                },
+              ].map(({ label, value, cls }) => (
+                <div
+                  key={label}
+                  className="bg-secondary/30 rounded p-2 text-center border border-border/50"
+                >
+                  <p className="text-[8px] text-muted-foreground uppercase tracking-wider">
+                    {label}
+                  </p>
+                  <p className={`font-mono text-sm font-bold ${cls}`}>
+                    {value}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {signals.length === 0 ? (
+            <div className="text-center py-6">
+              <p className="text-[11px] text-muted-foreground/50">
+                No signals generated yet.
+              </p>
+              <p className="text-[10px] text-muted-foreground/30 mt-1">
+                Waiting for HIGH confidence confluence (6+/8 signals).
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2 max-h-72 overflow-y-auto pr-0.5">
+              {signals.map((sig) => {
+                const cfg = statusConfig[sig.status];
+                const isCall = sig.action === "BUY CALL";
+                const actionCls = isCall
+                  ? "bg-green-950/50 border-green-800/40 text-green-300"
+                  : "bg-red-950/50 border-red-800/40 text-red-300";
+                const row = chain.find((r) => r.strike_price === sig.strike);
+                const currentLtp = isCall
+                  ? (row?.call_options?.market_data?.ltp ?? 0)
+                  : (row?.put_options?.market_data?.ltp ?? 0);
+                const pnl =
+                  currentLtp > 0
+                    ? ((currentLtp - sig.entryPrice) / sig.entryPrice) * 100
+                    : null;
+
+                return (
+                  <div
+                    key={sig.id}
+                    className={`rounded-lg border p-2.5 ${
+                      sig.status === "ACTIVE"
+                        ? "border-amber-800/40 bg-amber-950/10"
+                        : sig.status === "SL_HIT"
+                          ? "border-red-900/30 bg-red-950/10 opacity-70"
+                          : sig.status === "EXPIRED"
+                            ? "border-border/30 opacity-50"
+                            : "border-green-900/30 bg-green-950/10"
+                    }`}
+                  >
+                    {/* Row 1: action + instrument + status */}
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span
+                        className={`text-[10px] font-black px-2 py-0.5 rounded border ${actionCls}`}
+                      >
+                        {isCall ? "▲" : "▼"} {sig.action}
+                      </span>
+                      <span className="text-[11px] font-bold text-foreground font-mono">
+                        {sig.instrument} {sig.strike.toLocaleString("en-IN")}
+                      </span>
+                      <span className="text-[9px] text-muted-foreground">
+                        {sig.expiry}
+                      </span>
+                      <span
+                        className={`ml-auto text-[9px] font-bold px-1.5 py-0.5 rounded border ${cfg.cls}`}
+                      >
+                        {cfg.label}
+                      </span>
+                    </div>
+
+                    {/* Row 2: trade card */}
+                    <div className="grid grid-cols-4 gap-1 mb-1.5">
+                      {[
+                        {
+                          label: "Entry",
+                          value: `₹${sig.entryPrice.toFixed(2)}`,
+                          cls: "text-blue-300",
+                        },
+                        {
+                          label: "SL",
+                          value: `₹${sig.sl.toFixed(2)}`,
+                          cls: "text-red-400",
+                        },
+                        {
+                          label: "TGT1",
+                          value: `₹${sig.tgt1.toFixed(2)}`,
+                          cls: "text-green-400",
+                        },
+                        {
+                          label: "TGT2",
+                          value: `₹${sig.tgt2.toFixed(2)}`,
+                          cls: "text-emerald-300",
+                        },
+                      ].map(({ label, value, cls }) => (
+                        <div
+                          key={label}
+                          className="bg-secondary/20 rounded px-1.5 py-1 text-center border border-border/30"
+                        >
+                          <p className="text-[7px] text-muted-foreground uppercase tracking-wider">
+                            {label}
+                          </p>
+                          <p
+                            className={`font-mono text-[10px] font-bold ${cls}`}
+                          >
+                            {value}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Row 3: live LTP + P&L + timestamp */}
+                    <div className="flex items-center gap-3">
+                      {currentLtp > 0 && (
+                        <span className="text-[9px] text-muted-foreground">
+                          Live:{" "}
+                          <span className="font-mono text-foreground font-bold">
+                            ₹{currentLtp.toFixed(2)}
+                          </span>
+                        </span>
+                      )}
+                      {pnl !== null && sig.status === "ACTIVE" && (
+                        <span
+                          className={`text-[9px] font-mono font-bold ${pnl >= 0 ? "text-green-400" : "text-red-400"}`}
+                        >
+                          {pnl >= 0 ? "+" : ""}
+                          {pnl.toFixed(1)}%
+                        </span>
+                      )}
+                      <span className="text-[8px] text-muted-foreground/40 ml-auto">
+                        {new Date(sig.timestamp).toLocaleTimeString("en-IN", {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                        {" · "}
+                        {new Date(sig.timestamp).toLocaleDateString("en-IN", {
+                          day: "2-digit",
+                          month: "short",
+                        })}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function OptionChainTab({
   token,
   indexTicks,
@@ -4885,6 +6207,25 @@ function OptionChainTab({
   const [loading, setLoading] = useState(false);
   const selectedExpiryRef = useRef<HTMLButtonElement>(null);
 
+  // ── Signal Monitor state ───────────────────────────────────────────────────
+  const SIGNALS_KEY = "upstox_signals_v1";
+
+  const loadSignals = (): GeneratedSignal[] => {
+    try {
+      return JSON.parse(localStorage.getItem(SIGNALS_KEY) ?? "[]");
+    } catch {
+      return [];
+    }
+  };
+
+  const [signals, setSignals] = useState<GeneratedSignal[]>(loadSignals);
+  const [signalMonitorExpanded, setSignalMonitorExpanded] = useState(true);
+  const pendingSignalRef = useRef<{
+    key: string;
+    count: number;
+    data: Omit<GeneratedSignal, "id" | "timestamp" | "date" | "status">;
+  } | null>(null);
+
   useEffect(() => {
     if (initialUnderlying) setUnderlying(initialUnderlying);
   }, [initialUnderlying]);
@@ -4898,6 +6239,97 @@ function OptionChainTab({
       inline: "center",
     });
   }, [expiry]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: loadSignals is stable
+  const recordSignal = useCallback(
+    (
+      raw: Omit<GeneratedSignal, "id" | "timestamp" | "date" | "status"> & {
+        instrument?: string;
+      },
+    ) => {
+      const today = new Date().toISOString().slice(0, 10);
+      const existing = loadSignals();
+      const todayCount = existing.filter((s) => s.date === today).length;
+      if (todayCount >= 3) return;
+      const newSignal: GeneratedSignal = {
+        ...raw,
+        instrument: raw.instrument ?? underlying,
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: Date.now(),
+        date: today,
+        status: "ACTIVE",
+      };
+      const updated = [newSignal, ...existing].slice(0, 30);
+      localStorage.setItem("upstox_signals_v1", JSON.stringify(updated));
+      setSignals(updated);
+    },
+    [underlying],
+  );
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: loadSignals is stable
+  const handleSignalReady = useCallback(
+    (raw: Omit<GeneratedSignal, "id" | "timestamp" | "date" | "status">) => {
+      const key = `${raw.action}-${raw.strike}-${raw.expiry}`;
+      if (pendingSignalRef.current?.key === key) {
+        pendingSignalRef.current.count++;
+        if (pendingSignalRef.current.count >= 3) {
+          const existing = loadSignals();
+          const recentDuplicate = existing.find(
+            (s) =>
+              s.strike === raw.strike &&
+              s.action === raw.action &&
+              s.expiry === raw.expiry &&
+              Date.now() - s.timestamp < 60 * 60 * 1000,
+          );
+          if (!recentDuplicate) {
+            recordSignal(raw);
+          }
+          pendingSignalRef.current = null;
+        }
+      } else {
+        pendingSignalRef.current = { key, count: 1, data: raw };
+      }
+    },
+    [recordSignal],
+  );
+
+  useEffect(() => {
+    if (signals.length === 0 || chain.length === 0) return;
+    const now = Date.now();
+    let changed = false;
+    const updated = signals.map((sig) => {
+      if (sig.status !== "ACTIVE") return sig;
+      const expiryTs = new Date(sig.expiry).getTime();
+      if (now > expiryTs + 24 * 60 * 60 * 1000) {
+        changed = true;
+        return { ...sig, status: "EXPIRED" as const };
+      }
+      const row = chain.find((r) => r.strike_price === sig.strike);
+      if (!row) return sig;
+      const currentLtp =
+        sig.action === "BUY CALL"
+          ? (row.call_options?.market_data?.ltp ?? 0)
+          : (row.put_options?.market_data?.ltp ?? 0);
+      if (currentLtp <= 0) return sig;
+      if (currentLtp >= sig.tgt2) {
+        changed = true;
+        return { ...sig, status: "TARGET2_HIT" as const };
+      }
+      if (currentLtp >= sig.tgt1) {
+        changed = true;
+        return { ...sig, status: "TARGET1_HIT" as const };
+      }
+      if (currentLtp <= sig.sl) {
+        changed = true;
+        return { ...sig, status: "SL_HIT" as const };
+      }
+      return sig;
+    });
+    if (changed) {
+      localStorage.setItem("upstox_signals_v1", JSON.stringify(updated));
+      setSignals(updated);
+    }
+  }, [chain, signals]);
 
   const fetchExpiryDates = useCallback(
     async (underlyingKey: string) => {
@@ -5094,6 +6526,18 @@ function OptionChainTab({
         greeksData={greeksData}
         expanded={aiPanelExpanded}
         onToggleExpanded={() => setAiPanelExpanded((v) => !v)}
+        onSignalReady={handleSignalReady}
+      />
+      {/* Signal Monitor Panel */}
+      <SignalMonitorPanel
+        signals={signals}
+        expanded={signalMonitorExpanded}
+        onToggleExpanded={() => setSignalMonitorExpanded((v) => !v)}
+        onClear={() => {
+          localStorage.removeItem("upstox_signals_v1");
+          setSignals([]);
+        }}
+        chain={chain}
       />
       {/* Option Chain Header with toggle */}
       <div
@@ -6044,6 +7488,15 @@ function DashboardScreen({
     lotSize?: number;
   } | null>(null);
 
+  const [pendingSquareOff, setPendingSquareOff] = useState<{
+    instrumentKey: string;
+    name: string;
+    qty: number;
+    price: string;
+    lotSize: number;
+    mode: "sell" | "gtt";
+  } | null>(null);
+
   const handleBuyStrike = (
     instrumentKey: string,
     ltp: number,
@@ -6203,8 +7656,41 @@ function DashboardScreen({
                 }}
               />
             )}
-            {activeTab === "positions" && <PositionsTab token={token} />}
-            {activeTab === "holdings" && <HoldingsTab token={token} />}
+            {activeTab === "positions" && (
+              <PositionsTab
+                token={token}
+                onSquareOff={(pos, mode) => {
+                  const instrumentKey = pos.instrument_token;
+                  const qty = Math.abs(pos.quantity);
+                  setPendingSquareOff({
+                    instrumentKey,
+                    name: pos.tradingsymbol || instrumentKey,
+                    qty,
+                    price: pos.last_price.toFixed(2),
+                    lotSize: qty,
+                    mode,
+                  });
+                }}
+              />
+            )}
+            {activeTab === "holdings" && (
+              <HoldingsTab
+                token={token}
+                onSquareOff={(h, mode) => {
+                  const instrumentKey =
+                    h.instrument_token || `${h.exchange}_EQ|${h.tradingsymbol}`;
+                  const qty = h.quantity;
+                  setPendingSquareOff({
+                    instrumentKey,
+                    name: h.tradingsymbol || instrumentKey,
+                    qty,
+                    price: h.last_price.toFixed(2),
+                    lotSize: qty,
+                    mode,
+                  });
+                }}
+              />
+            )}
             {activeTab === "options" && (
               <OptionChainTab
                 token={token}
@@ -6218,6 +7704,77 @@ function DashboardScreen({
             {activeTab === "market" && <LiveTab token={token} />}
             {activeTab === "risk" && <RiskTab token={token} />}
           </div>
+
+          {/* Square-Off Confirmation Dialog */}
+          <AlertDialog
+            open={!!pendingSquareOff}
+            onOpenChange={(open) => {
+              if (!open) setPendingSquareOff(null);
+            }}
+          >
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Confirm Square Off</AlertDialogTitle>
+                <AlertDialogDescription>
+                  {pendingSquareOff && (
+                    <>
+                      Are you sure you want to square off{" "}
+                      <span className="font-semibold text-foreground">
+                        {pendingSquareOff.name}
+                      </span>{" "}
+                      —{" "}
+                      <span className="font-semibold text-foreground">
+                        {pendingSquareOff.qty} qty
+                      </span>{" "}
+                      {pendingSquareOff.mode === "sell"
+                        ? "at market price (SELL order)"
+                        : "via GTT SELL order"}
+                      ?
+                    </>
+                  )}
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel
+                  data-ocid="squareoff.cancel_button"
+                  onClick={() => setPendingSquareOff(null)}
+                >
+                  Cancel
+                </AlertDialogCancel>
+                <AlertDialogAction
+                  data-ocid="squareoff.confirm_button"
+                  className="bg-red-600 hover:bg-red-500 text-white"
+                  onClick={() => {
+                    if (!pendingSquareOff) return;
+                    const { instrumentKey, price, qty, lotSize, mode } =
+                      pendingSquareOff;
+                    if (mode === "sell") {
+                      setOrderPrefill({
+                        instrumentKey,
+                        txType: "SELL",
+                        price,
+                        quantity: String(qty),
+                      });
+                    } else {
+                      setOrderPrefill({
+                        instrumentKey,
+                        txType: "SELL",
+                        price,
+                        quantity: String(qty),
+                        lotSize,
+                        // @ts-ignore
+                        gttMode: true,
+                      });
+                    }
+                    setActiveTab("orders");
+                    setPendingSquareOff(null);
+                  }}
+                >
+                  Confirm Square Off
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
 
           {/* Footer */}
           <footer
