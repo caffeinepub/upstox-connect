@@ -213,6 +213,7 @@ interface TickData {
   ask: number;
   volume: number;
   change: number;
+  prevClose: number;
   ts: number;
 }
 
@@ -389,13 +390,17 @@ function useIndexWebSocket(token: string) {
         const ltpData = ff.ltpc ?? {};
         const ltp = ltpData.ltp ?? ltpData.close_price ?? next[key]?.ltp ?? 0;
         if (ltp > 0) {
+          const cp = ltpData.cp ?? next[key]?.prevClose ?? 0;
+          const changePct =
+            cp > 0 ? ((ltp - cp) / cp) * 100 : (next[key]?.change ?? 0);
           next[key] = {
             key,
             ltp,
             bid: 0,
             ask: 0,
             volume: ff.marketLevel?.bidAskQuote?.[0]?.bidQ ?? 0,
-            change: ltpData.cp ?? next[key]?.change ?? 0,
+            change: changePct,
+            prevClose: cp > 0 ? cp : (next[key]?.prevClose ?? 0),
             ts: Date.now(),
           };
         }
@@ -487,11 +492,16 @@ function useIndexWebSocket(token: string) {
               const key = rawKey.replace(":", "|");
               const ltp = val?.last_price ?? 0;
               if (ltp > 0) {
-                const prevLtp = prev[key]?.ltp ?? 0;
+                const prevClose = prev[key]?.prevClose ?? 0;
+                const changePct =
+                  prevClose > 0
+                    ? ((ltp - prevClose) / prevClose) * 100
+                    : (prev[key]?.change ?? 0);
                 next[key] = {
                   key,
                   ltp,
-                  change: ltp - prevLtp,
+                  change: changePct,
+                  prevClose,
                   bid: 0,
                   ask: 0,
                   volume: 0,
@@ -590,38 +600,45 @@ function IndexChip({
       onContextMenu={onContextMenu}
       title="Right-click for options"
     >
+      {/* Row 1: Label + Current LTP */}
       <div className="flex items-center gap-1.5">
-        <span className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+        <span className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
           {label}
         </span>
         {tick ? (
-          <>
-            <span
-              className={`font-mono-data text-sm font-bold tabular-nums ${isVix ? vixColor : isStale ? "text-foreground/60" : "text-foreground"}`}
-            >
-              {tick.ltp.toLocaleString("en-IN", {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2,
-              })}
-            </span>
-            <span
-              className={`text-xs font-bold px-2 py-0.5 rounded ${
-                pos
-                  ? "bg-green-950 text-gain border border-green-800/40"
-                  : "bg-red-950 text-loss border border-red-800/40"
-              } ${isStale ? "opacity-60" : ""}`}
-            >
-              {pos ? "+" : ""}
-              {tick.change.toFixed(2)}%
-            </span>
-            {isStale && <span className="text-[8px] text-amber-400/70">●</span>}
-          </>
+          <span
+            className={`font-mono-data text-sm font-bold tabular-nums ${isVix ? vixColor : isStale ? "text-foreground/60" : "text-foreground"}`}
+          >
+            {tick.ltp.toLocaleString("en-IN", {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            })}
+          </span>
         ) : (
           <span className="text-[10px] text-muted-foreground font-mono-data">
             {loading ? "…" : "—"}
           </span>
         )}
+        {tick && isStale && (
+          <span className="text-[8px] text-amber-400/70">●</span>
+        )}
       </div>
+      {/* Row 2: Change badge (-476.80 (-2.06%)) */}
+      {tick && (
+        <div className="flex items-center gap-1">
+          <span
+            className={`text-[10px] font-bold px-1.5 py-0.5 rounded tabular-nums font-mono-data ${
+              pos
+                ? "bg-green-950 text-gain border border-green-800/40"
+                : "bg-red-950 text-loss border border-red-800/40"
+            } ${isStale ? "opacity-60" : ""}`}
+          >
+            {pos ? "+" : ""}
+            {(tick.ltp - (tick.prevClose ?? 0)).toFixed(2)} ({pos ? "+" : ""}
+            {tick.change.toFixed(2)}%)
+          </span>
+        </div>
+      )}
       {tick && (
         <span className="text-[9px] text-muted-foreground/50 font-mono-data leading-none">
           {getTimeAgo(tick.ts)}
@@ -1205,7 +1222,7 @@ function WatchlistPanel({
         className="flex items-center justify-between px-3 py-2 border-b border-border"
         style={{ background: "oklch(var(--background))" }}
       >
-        <span className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+        <span className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
           Watchlist
         </span>
         <div className="flex items-center gap-1">
@@ -2188,7 +2205,7 @@ function OrdersTab({
               <>
                 <div className="p-4 border-b border-border">
                   <div className="flex items-center justify-between mb-3">
-                    <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+                    <p className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
                       {editingOrderId
                         ? `Modify Order · ${editingOrderId.slice(0, 16)}...`
                         : "Place Order"}
@@ -2633,7 +2650,7 @@ function OrdersTab({
             {/* Order Book */}
             <div className="p-3">
               <div className="flex items-center justify-between mb-2">
-                <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+                <p className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
                   Order Book
                 </p>
                 <div className="flex items-center gap-2">
@@ -3208,7 +3225,7 @@ function OrdersTab({
             {/* GTT Order Book */}
             <div className="p-3">
               <div className="flex items-center justify-between mb-2">
-                <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+                <p className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
                   GTT Order Book
                 </p>
                 <div className="flex items-center gap-1.5">
@@ -4801,10 +4818,10 @@ function TrendAnalysisPanel({
   // ── Style classes ─────────────────────────────────────────────────────────
   const actionBg =
     action === "BUY CALL"
-      ? "bg-green-950 border-green-700/60 text-green-300"
+      ? "bg-green-900/70 border-green-500/70 text-green-100"
       : action === "BUY PUT"
-        ? "bg-red-950 border-red-700/60 text-red-300"
-        : "bg-secondary border-border text-muted-foreground";
+        ? "bg-red-900/50 border-red-500/60 text-red-100"
+        : "bg-background border-border text-foreground";
 
   const confCls =
     confidence === "HIGH"
@@ -4822,7 +4839,7 @@ function TrendAnalysisPanel({
       {/* Header with toggle */}
       <div className="flex items-center gap-2 px-3 py-2">
         <BarChart2 className="w-3.5 h-3.5 text-primary" />
-        <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+        <p className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
           AI Option Chain Analysis
         </p>
         <span className="ml-auto text-[9px] text-muted-foreground/50 italic">
@@ -4887,11 +4904,11 @@ function TrendAnalysisPanel({
                     }}
                   />
                 </div>
-                <span className="text-[9px] text-muted-foreground/70 font-mono-data shrink-0">
+                <span className="text-[9px] text-foreground/70 font-mono-data shrink-0">
                   {trend === "BULLISH" ? bullSignals : bearSignals}/8
                 </span>
               </div>
-              <span className="text-[10px] text-muted-foreground ml-auto">
+              <span className="text-[10px] text-foreground/80 font-semibold ml-auto">
                 Strike:{" "}
                 <span className="font-mono-data font-bold text-foreground">
                   {recommendedStrike > 0
@@ -4904,7 +4921,7 @@ function TrendAnalysisPanel({
             {/* Strike + Expiry */}
             <div className="grid grid-cols-2 gap-2 mb-2">
               <div>
-                <p className="text-[9px] text-muted-foreground mb-0.5 uppercase tracking-wider">
+                <p className="text-[10px] text-foreground/80 font-bold mb-0.5 uppercase tracking-wider">
                   Strike Price
                 </p>
                 <p className="font-mono-data text-xl font-black text-foreground">
@@ -4914,7 +4931,7 @@ function TrendAnalysisPanel({
                 </p>
               </div>
               <div>
-                <p className="text-[9px] text-muted-foreground mb-0.5 uppercase tracking-wider">
+                <p className="text-[10px] text-foreground/80 font-bold mb-0.5 uppercase tracking-wider">
                   Expiry
                 </p>
                 <p className="font-mono-data text-sm font-bold text-foreground">
@@ -4934,7 +4951,7 @@ function TrendAnalysisPanel({
                 return (
                   <div className="flex mb-2 rounded-lg border border-border bg-card overflow-hidden">
                     <div className="flex-1 text-center py-2 px-1">
-                      <p className="text-[8px] text-muted-foreground mb-1 uppercase tracking-widest font-semibold">
+                      <p className="text-[9px] text-foreground/80 font-bold mb-1 uppercase tracking-widest">
                         Buy Price
                       </p>
                       <p className="font-mono-data text-sm font-black text-blue-300">
@@ -4942,18 +4959,18 @@ function TrendAnalysisPanel({
                       </p>
                     </div>
                     <div className="flex-1 text-center py-2 px-1 border-l border-border">
-                      <p className="text-[8px] text-muted-foreground mb-1 uppercase tracking-widest font-semibold">
+                      <p className="text-[9px] text-foreground/80 font-bold mb-1 uppercase tracking-widest">
                         SL
                       </p>
                       <p className="font-mono-data text-sm font-black text-red-400">
                         ₹{sl.toFixed(2)}
                       </p>
-                      <p className="text-[8px] text-muted-foreground/60 mt-0.5">
+                      <p className="text-[9px] text-foreground/80 mt-0.5">
                         R:R 1:{(tradeSettings?.tgt1RR ?? 2).toFixed(1)}
                       </p>
                     </div>
                     <div className="flex-1 text-center py-2 px-1 border-l border-border">
-                      <p className="text-[8px] text-muted-foreground mb-1 uppercase tracking-widest font-semibold">
+                      <p className="text-[9px] text-foreground/80 font-bold mb-1 uppercase tracking-widest">
                         TGT1
                       </p>
                       <p className="font-mono-data text-sm font-black text-green-400">
@@ -4961,7 +4978,7 @@ function TrendAnalysisPanel({
                       </p>
                     </div>
                     <div className="flex-1 text-center py-2 px-1 border-l border-border">
-                      <p className="text-[8px] text-muted-foreground mb-1 uppercase tracking-widest font-semibold">
+                      <p className="text-[9px] text-foreground/80 font-bold mb-1 uppercase tracking-widest">
                         TGT2
                       </p>
                       <p className="font-mono-data text-sm font-black text-emerald-300">
@@ -4981,7 +4998,7 @@ function TrendAnalysisPanel({
               <div className="flex gap-2 flex-wrap mb-2">
                 {atmDeltaVal !== null && (
                   <div className="flex flex-col items-center bg-secondary/30 rounded px-2 py-1 border border-border/50 min-w-[44px]">
-                    <span className="text-[8px] text-muted-foreground uppercase tracking-wider">
+                    <span className="text-[9px] text-foreground font-semibold uppercase tracking-wider">
                       Δ Delta
                     </span>
                     <span
@@ -4993,7 +5010,7 @@ function TrendAnalysisPanel({
                 )}
                 {atmGamma !== null && (
                   <div className="flex flex-col items-center bg-secondary/30 rounded px-2 py-1 border border-border/50 min-w-[44px]">
-                    <span className="text-[8px] text-muted-foreground uppercase tracking-wider">
+                    <span className="text-[9px] text-foreground font-semibold uppercase tracking-wider">
                       Γ Gamma
                     </span>
                     <span
@@ -5005,7 +5022,7 @@ function TrendAnalysisPanel({
                 )}
                 {atmTheta !== null && (
                   <div className="flex flex-col items-center bg-secondary/30 rounded px-2 py-1 border border-border/50 min-w-[44px]">
-                    <span className="text-[8px] text-muted-foreground uppercase tracking-wider">
+                    <span className="text-[9px] text-foreground font-semibold uppercase tracking-wider">
                       Θ Theta
                     </span>
                     <span
@@ -5022,7 +5039,7 @@ function TrendAnalysisPanel({
                 )}
                 {atmVega !== null && (
                   <div className="flex flex-col items-center bg-secondary/30 rounded px-2 py-1 border border-border/50 min-w-[44px]">
-                    <span className="text-[8px] text-muted-foreground uppercase tracking-wider">
+                    <span className="text-[9px] text-foreground font-semibold uppercase tracking-wider">
                       ν Vega
                     </span>
                     <span className="text-[11px] font-mono-data font-bold text-foreground">
@@ -5032,7 +5049,7 @@ function TrendAnalysisPanel({
                 )}
                 {atmIV !== null && (
                   <div className="flex flex-col items-center bg-secondary/30 rounded px-2 py-1 border border-border/50 min-w-[44px]">
-                    <span className="text-[8px] text-muted-foreground uppercase tracking-wider">
+                    <span className="text-[9px] text-foreground font-semibold uppercase tracking-wider">
                       IV %
                     </span>
                     <span
@@ -5050,20 +5067,20 @@ function TrendAnalysisPanel({
               <div className="grid grid-cols-2 gap-2 mb-2">
                 {bestCeStrike && (
                   <div className="rounded border border-green-800/40 bg-green-950/20 p-2">
-                    <p className="text-[8px] text-muted-foreground uppercase tracking-wider mb-1">
+                    <p className="text-[9px] text-foreground font-semibold uppercase tracking-wider mb-1">
                       Best CE Entry
                     </p>
                     <p className="font-mono-data text-sm font-bold text-green-300">
                       {bestCeStrike.strike.toLocaleString("en-IN")}
                     </p>
                     <div className="flex gap-2 mt-1">
-                      <span className="text-[9px] text-muted-foreground">
+                      <span className="text-[9px] text-foreground/90">
                         ₹{bestCeStrike.ltp.toFixed(2)}
                       </span>
-                      <span className="text-[9px] text-muted-foreground">
+                      <span className="text-[9px] text-foreground/90">
                         Δ {bestCeStrike.delta.toFixed(3)}
                       </span>
-                      <span className="text-[9px] text-muted-foreground">
+                      <span className="text-[9px] text-foreground/90">
                         Θ {bestCeStrike.theta.toFixed(2)}
                       </span>
                     </div>
@@ -5071,20 +5088,20 @@ function TrendAnalysisPanel({
                 )}
                 {bestPeStrike && (
                   <div className="rounded border border-red-800/40 bg-red-950/20 p-2">
-                    <p className="text-[8px] text-muted-foreground uppercase tracking-wider mb-1">
+                    <p className="text-[9px] text-foreground font-semibold uppercase tracking-wider mb-1">
                       Best PE Entry
                     </p>
                     <p className="font-mono-data text-sm font-bold text-red-300">
                       {bestPeStrike.strike.toLocaleString("en-IN")}
                     </p>
                     <div className="flex gap-2 mt-1">
-                      <span className="text-[9px] text-muted-foreground">
+                      <span className="text-[9px] text-foreground/90">
                         ₹{bestPeStrike.ltp.toFixed(2)}
                       </span>
-                      <span className="text-[9px] text-muted-foreground">
+                      <span className="text-[9px] text-foreground/90">
                         Δ {bestPeStrike.delta.toFixed(3)}
                       </span>
-                      <span className="text-[9px] text-muted-foreground">
+                      <span className="text-[9px] text-foreground/90">
                         Θ {bestPeStrike.theta.toFixed(2)}
                       </span>
                     </div>
@@ -5095,7 +5112,7 @@ function TrendAnalysisPanel({
 
             {/* OI Concentration bars */}
             <div className="mb-2">
-              <p className="text-[8px] text-muted-foreground uppercase tracking-wider mb-1">
+              <p className="text-[9px] text-foreground font-semibold uppercase tracking-wider mb-1">
                 OI Concentration
               </p>
               <div className="space-y-1">
@@ -5121,7 +5138,7 @@ function TrendAnalysisPanel({
                           }}
                         />
                       </div>
-                      <span className="text-[8px] text-muted-foreground/60 w-12 shrink-0">
+                      <span className="text-[9px] text-foreground/80 w-12 shrink-0">
                         {(oi / 100000).toFixed(1)}L CE
                       </span>
                     </div>
@@ -5149,7 +5166,7 @@ function TrendAnalysisPanel({
                           }}
                         />
                       </div>
-                      <span className="text-[8px] text-muted-foreground/60 w-12 shrink-0">
+                      <span className="text-[9px] text-foreground/80 w-12 shrink-0">
                         {(oi / 100000).toFixed(1)}L PE
                       </span>
                     </div>
@@ -5169,37 +5186,37 @@ function TrendAnalysisPanel({
             >
               {/* Compact metrics — always visible */}
               <div className="flex gap-3 flex-wrap text-[10px] cursor-pointer">
-                <span className="text-muted-foreground">
+                <span className="text-foreground font-semibold">
                   PCR{" "}
                   <span className="font-mono-data text-foreground">
                     {PCR.toFixed(2)}
                   </span>
                 </span>
-                <span className="text-muted-foreground">
+                <span className="text-foreground font-semibold">
                   Max Pain{" "}
                   <span className="font-mono-data text-amber-300">
                     {maxPainStrike.toLocaleString("en-IN")}
                   </span>
                 </span>
-                <span className="text-muted-foreground">
+                <span className="text-foreground font-semibold">
                   CE Res{" "}
                   <span className="font-mono-data text-red-300">
                     {maxCeOiRow.strike_price.toLocaleString("en-IN")}
                   </span>
                 </span>
-                <span className="text-muted-foreground">
+                <span className="text-foreground font-semibold">
                   PE Sup{" "}
                   <span className="font-mono-data text-green-300">
                     {maxPeOiRow.strike_price.toLocaleString("en-IN")}
                   </span>
                 </span>
-                <span className="text-muted-foreground">
+                <span className="text-foreground font-semibold">
                   OI Hot{" "}
-                  <span className="font-mono-data text-foreground/70">
+                  <span className="font-mono-data text-foreground/90">
                     {oiMomentumRow.strike_price.toLocaleString("en-IN")}
                   </span>
                 </span>
-                <span className="text-[9px] text-muted-foreground/40 italic ml-auto">
+                <span className="text-[9px] text-foreground/70 italic ml-auto">
                   tap/hover for analysis
                 </span>
               </div>
@@ -5213,7 +5230,7 @@ function TrendAnalysisPanel({
                   return line ? (
                     <p
                       key={line.slice(0, 30)}
-                      className="text-[10px] text-muted-foreground leading-relaxed"
+                      className="text-[11px] text-foreground/80 leading-relaxed"
                     >
                       {icons[i] ?? "•"} {line}
                     </p>
@@ -5222,7 +5239,7 @@ function TrendAnalysisPanel({
               </div>
             </div>
           </div>
-          <p className="text-[9px] text-muted-foreground/50 italic text-center">
+          <p className="text-[9px] text-foreground/60 italic text-center">
             ⚠️ AI analysis based on OI data. Trade at your own risk.
           </p>
         </div>
@@ -5978,20 +5995,20 @@ function SignalMonitorPanel({
         <div
           className={`w-2 h-2 rounded-full ${activeSignals > 0 ? "bg-green-400 animate-pulse" : "bg-muted-foreground/30"}`}
         />
-        <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+        <p className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
           Signal Monitor
         </p>
         <span className="text-[9px] px-1.5 py-0.5 rounded bg-primary/20 text-primary font-mono font-bold border border-primary/30">
           {todayCount}/3 today
         </span>
-        <span className="text-[9px] text-muted-foreground/50 ml-auto">
+        <span className="text-[10px] text-foreground/70 font-semibold ml-auto">
           Win {winPct}% · {activeSignals} active
         </span>
         {signals.length > 0 && (
           <button
             type="button"
             onClick={onClear}
-            className="text-[9px] text-muted-foreground/40 hover:text-red-400 transition-colors px-1"
+            className="text-[9px] text-foreground/50 hover:text-red-400 transition-colors px-1"
           >
             Clear
           </button>
@@ -6039,7 +6056,7 @@ function SignalMonitorPanel({
                   key={label}
                   className="bg-secondary/30 rounded p-2 text-center border border-border/50"
                 >
-                  <p className="text-[8px] text-muted-foreground uppercase tracking-wider">
+                  <p className="text-[9px] text-foreground/75 font-semibold uppercase tracking-wider">
                     {label}
                   </p>
                   <p className={`font-mono text-sm font-bold ${cls}`}>
@@ -6052,10 +6069,10 @@ function SignalMonitorPanel({
 
           {signals.length === 0 ? (
             <div className="text-center py-6">
-              <p className="text-[11px] text-muted-foreground/50">
+              <p className="text-[11px] text-foreground/60">
                 No signals generated yet.
               </p>
-              <p className="text-[10px] text-muted-foreground/30 mt-1">
+              <p className="text-[10px] text-foreground/50 mt-1">
                 Waiting for HIGH confidence confluence (6+/8 signals).
               </p>
             </div>
@@ -6137,7 +6154,7 @@ function SignalMonitorPanel({
                           key={label}
                           className="bg-secondary/20 rounded px-1.5 py-1 text-center border border-border/30"
                         >
-                          <p className="text-[7px] text-muted-foreground uppercase tracking-wider">
+                          <p className="text-[9px] text-foreground/80 font-bold uppercase tracking-wider">
                             {label}
                           </p>
                           <p
@@ -6152,7 +6169,7 @@ function SignalMonitorPanel({
                     {/* Row 3: live LTP + P&L + timestamp */}
                     <div className="flex items-center gap-3">
                       {currentLtp > 0 && (
-                        <span className="text-[9px] text-muted-foreground">
+                        <span className="text-[9px] text-foreground/70">
                           Live:{" "}
                           <span className="font-mono text-foreground font-bold">
                             ₹{currentLtp.toFixed(2)}
@@ -6167,7 +6184,7 @@ function SignalMonitorPanel({
                           {pnl.toFixed(1)}%
                         </span>
                       )}
-                      <span className="text-[8px] text-muted-foreground/40 ml-auto">
+                      <span className="text-[9px] text-foreground/60 ml-auto">
                         {new Date(sig.timestamp).toLocaleTimeString("en-IN", {
                           hour: "2-digit",
                           minute: "2-digit",
@@ -6567,7 +6584,7 @@ function OptionChainTab({
           className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-colors border ${
             aiPanelExpanded
               ? "bg-primary/20 text-primary border-primary/40"
-              : "bg-secondary text-muted-foreground border-border hover:text-foreground"
+              : "bg-secondary text-foreground/80 border-border hover:text-foreground"
           }`}
         >
           <Brain className="w-3 h-3" />
@@ -6575,7 +6592,7 @@ function OptionChainTab({
         </button>
         <div className="flex items-center gap-2">
           <LineChart className="w-3.5 h-3.5 text-primary" />
-          <span className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+          <span className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
             Option Chain
           </span>
           <button
@@ -6614,7 +6631,7 @@ function OptionChainTab({
                   className={`px-3 py-1.5 rounded text-xs font-bold border transition-colors ${
                     underlying === u.key
                       ? "bg-primary/20 text-primary border-primary/50"
-                      : "bg-secondary text-muted-foreground border-border hover:text-foreground"
+                      : "bg-secondary text-foreground/80 border-border hover:text-foreground"
                   }`}
                 >
                   {u.label}
@@ -6647,7 +6664,7 @@ function OptionChainTab({
                     className={`shrink-0 px-3 py-1 rounded-full text-[10px] font-mono font-bold border transition-colors whitespace-nowrap ${
                       expiry === d
                         ? "bg-primary/20 text-primary border-primary/50"
-                        : "bg-secondary text-muted-foreground border-border hover:text-foreground"
+                        : "bg-secondary text-foreground/80 border-border hover:text-foreground"
                     }`}
                   >
                     {d}
@@ -6757,7 +6774,7 @@ function OptionChainTab({
                         )}
                         <td
                           className={`py-1.5 px-3 text-center font-mono-data font-bold text-xs ${
-                            isAtm ? "text-atm" : "text-muted-foreground"
+                            isAtm ? "text-atm" : "text-foreground"
                           }`}
                         >
                           {isAtm && (
@@ -6880,13 +6897,18 @@ function LiveTab({ token }: { token: string }) {
         const ltpData = ff.ltpc ?? {};
         const md = ff.marketDeptFF?.bid ?? [];
         const ask = ff.marketDeptFF?.ask ?? [];
+        const ltp2 = ltpData.ltp ?? next[key]?.ltp ?? 0;
+        const cp2 = ltpData.cp ?? next[key]?.prevClose ?? 0;
+        const changePct2 =
+          cp2 > 0 ? ((ltp2 - cp2) / cp2) * 100 : (next[key]?.change ?? 0);
         next[key] = {
           key,
-          ltp: ltpData.ltp ?? next[key]?.ltp ?? 0,
+          ltp: ltp2,
           bid: md[0]?.price ?? 0,
           ask: ask[0]?.price ?? 0,
           volume: ff.ltpc?.toi ?? next[key]?.volume ?? 0,
-          change: ltpData.cp ?? next[key]?.change ?? 0,
+          change: changePct2,
+          prevClose: cp2 > 0 ? cp2 : (next[key]?.prevClose ?? 0),
           ts: Date.now(),
         };
       }
@@ -7206,7 +7228,7 @@ function OverviewTab({
           className="px-4 py-2.5 border-b border-border"
           style={{ background: "oklch(var(--card))" }}
         >
-          <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+          <p className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
             Portfolio Summary
           </p>
         </div>
@@ -7239,7 +7261,7 @@ function OverviewTab({
             className="px-4 py-2.5 border-b border-border"
             style={{ background: "oklch(var(--card))" }}
           >
-            <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+            <p className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
               Index Overview
             </p>
           </div>
@@ -7303,7 +7325,7 @@ function OverviewTab({
           className="px-4 py-2.5 border-b border-border"
           style={{ background: "oklch(var(--card))" }}
         >
-          <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+          <p className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
             Profile
           </p>
         </div>
@@ -7372,7 +7394,7 @@ function OverviewTab({
           className="px-4 py-2.5 border-b border-border flex items-center justify-between"
           style={{ background: "oklch(var(--card))" }}
         >
-          <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+          <p className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
             Access Token
           </p>
           <div className="flex items-center gap-2">
@@ -7951,7 +7973,7 @@ function SetupScreen({ onToken }: { onToken: (token: string) => void }) {
             className="px-4 py-2.5 border-b border-border"
             style={{ background: "oklch(var(--card))" }}
           >
-            <p className="text-[10px] font-bold text-muted-foreground tracking-widest uppercase">
+            <p className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
               OAuth Setup
             </p>
           </div>
@@ -8026,7 +8048,7 @@ function SetupScreen({ onToken }: { onToken: (token: string) => void }) {
           <button
             type="button"
             onClick={() => setShowManual(!showManual)}
-            className="w-full px-4 py-2.5 flex items-center justify-between text-[10px] font-bold text-muted-foreground tracking-widest uppercase border-b border-border hover:text-foreground transition-colors"
+            className="w-full px-4 py-2.5 flex items-center justify-between text-[10px] font-bold text-foreground/80 tracking-widest uppercase border-b border-border hover:text-foreground transition-colors"
             style={{ background: "oklch(var(--card))" }}
           >
             Manual Token Entry
