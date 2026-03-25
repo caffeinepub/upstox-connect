@@ -60,7 +60,8 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import React, { memo, useCallback, useEffect, useRef, useState } from "react";
+import type React from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 // ─── Black-Scholes Functions ──────────────────────────────────────────────────
@@ -230,23 +231,6 @@ interface Funds {
   total: number;
 }
 
-interface Order {
-  order_id: string;
-  tradingsymbol: string;
-  instrument_token: string;
-  transaction_type: string;
-  order_type: string;
-  quantity: number;
-  price: number;
-  trigger_price: number;
-  status: string;
-  product: string;
-  validity: string;
-  exchange: string;
-  average_price: number;
-  placed_by: string;
-}
-
 interface Position {
   tradingsymbol: string;
   exchange: string;
@@ -296,7 +280,7 @@ interface OptionData {
   };
 }
 
-type Screen = "setup" | "dashboard" | "exchanging";
+type Screen = "setup" | "dashboard";
 
 // ─── Utility: call Upstox REST ────────────────────────────────────────────────
 async function upstoxFetch<T>(
@@ -474,7 +458,7 @@ function useIndexWebSocket(token: string) {
       try {
         const keys = INDEX_KEYS.join(",");
         const res = await fetch(
-          `https://api.upstox.com/v2/market-quote/ltp?instrument_key=${encodeURIComponent(keys)}`,
+          `https://api.upstox.com/v2/market-quote/ohlc?instrument_key=${encodeURIComponent(keys)}&interval=1d`,
           {
             headers: {
               Authorization: `Bearer ${token}`,
@@ -492,7 +476,13 @@ function useIndexWebSocket(token: string) {
               const key = rawKey.replace(":", "|");
               const ltp = val?.last_price ?? 0;
               if (ltp > 0) {
-                const prevClose = prev[key]?.prevClose ?? 0;
+                const apiPrevClose =
+                  val?.prev_close_price ??
+                  val?.previous_close ??
+                  val?.ohlc?.close ??
+                  0;
+                const prevClose =
+                  apiPrevClose > 0 ? apiPrevClose : (prev[key]?.prevClose ?? 0);
                 const changePct =
                   prevClose > 0
                     ? ((ltp - prevClose) / prevClose) * 100
@@ -661,10 +651,6 @@ interface TradeSettings {
 
 interface AccountEntry {
   id: string;
-  name: string;
-  apiKey: string;
-  apiSecret: string;
-  redirectUri: string;
   token: string;
 }
 
@@ -714,42 +700,14 @@ function loadAccounts(): AccountEntry[] {
 function SettingsModal({
   open,
   onClose,
-  tradeSettings,
-  onTradeSettingsSave,
 }: {
   open: boolean;
   onClose: () => void;
-  tradeSettings: TradeSettings;
-  onTradeSettingsSave: (s: TradeSettings) => void;
 }) {
-  const [sl, setSl] = useState(String(tradeSettings.slPct));
-  const [tg, setTg] = useState(String(tradeSettings.trailingGap));
-  const [t1, setT1] = useState(String(tradeSettings.tgt1RR));
-  const [t2, setT2] = useState(String(tradeSettings.tgt2RR));
   const [accounts, setAccounts] = useState<AccountEntry[]>(loadAccounts);
   const [showAddForm, setShowAddForm] = useState(false);
-  const [newAcc, setNewAcc] = useState<Omit<AccountEntry, "id">>({
-    name: "",
-    apiKey: "",
-    apiSecret: "",
-    redirectUri: "",
-    token: "",
-  });
+  const [newAcc, setNewAcc] = useState<Omit<AccountEntry, "id">>({ token: "" });
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
-
-  const currentApiKey = localStorage.getItem("upstox_api_key") ?? "";
-
-  const saveTradeSettings = () => {
-    const s: TradeSettings = {
-      slPct: Math.min(99, Math.max(1, Number(sl) || 25)),
-      trailingGap: Math.min(50, Math.max(0.5, Number(tg) || 5)),
-      tgt1RR: Math.min(20, Math.max(1, Number(t1) || 2)),
-      tgt2RR: Math.min(20, Math.max(1, Number(t2) || 3)),
-    };
-    localStorage.setItem(TRADE_SETTINGS_KEY, JSON.stringify(s));
-    onTradeSettingsSave(s);
-    toast.success("Trade settings saved");
-  };
 
   const saveAccounts = (list: AccountEntry[]) => {
     setAccounts(list);
@@ -757,29 +715,20 @@ function SettingsModal({
   };
 
   const addAccount = () => {
-    if (!newAcc.name || !newAcc.apiKey) {
-      toast.error("Name and API Key are required");
+    if (!newAcc.token.trim()) {
+      toast.error("Access Token is required");
       return;
     }
     const entry: AccountEntry = { ...newAcc, id: Date.now().toString() };
     saveAccounts([...accounts, entry]);
-    setNewAcc({
-      name: "",
-      apiKey: "",
-      apiSecret: "",
-      redirectUri: "",
-      token: "",
-    });
+    setNewAcc({ token: "" });
     setShowAddForm(false);
-    toast.success("Account added");
+    toast.success("Token saved");
   };
 
   const switchAccount = (acc: AccountEntry) => {
-    localStorage.setItem("upstox_api_key", acc.apiKey);
-    localStorage.setItem("upstox_api_secret", acc.apiSecret);
-    localStorage.setItem("upstox_redirect_uri", acc.redirectUri);
     localStorage.setItem("upstox_token", acc.token);
-    toast.success(`Switched to ${acc.name}`);
+    toast.success("Token switched");
     setTimeout(() => window.location.reload(), 600);
   };
 
@@ -805,15 +754,8 @@ function SettingsModal({
             Settings
           </DialogTitle>
         </DialogHeader>
-        <SettingsTabs defaultValue="trade">
+        <SettingsTabs defaultValue="accounts">
           <SettingsTabsList className="w-full mb-3 bg-secondary">
-            <SettingsTabsTrigger
-              data-ocid="settings.trade_settings.tab"
-              value="trade"
-              className="flex-1 text-xs"
-            >
-              Trade Settings
-            </SettingsTabsTrigger>
             <SettingsTabsTrigger
               data-ocid="settings.accounts.tab"
               value="accounts"
@@ -822,84 +764,6 @@ function SettingsModal({
               Accounts
             </SettingsTabsTrigger>
           </SettingsTabsList>
-
-          <SettingsTabsContent value="trade" className="space-y-3 mt-0">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                  Stop Loss %
-                </Label>
-                <Input
-                  data-ocid="settings.sl_pct.input"
-                  type="number"
-                  min={1}
-                  max={99}
-                  step={0.5}
-                  value={sl}
-                  onChange={(e) => setSl(e.target.value)}
-                  className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs"
-                />
-              </div>
-              <div>
-                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                  Trailing SL Gap %
-                </Label>
-                <Input
-                  data-ocid="settings.trailing_gap.input"
-                  type="number"
-                  min={0.5}
-                  max={50}
-                  step={0.5}
-                  value={tg}
-                  onChange={(e) => setTg(e.target.value)}
-                  className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs"
-                />
-              </div>
-              <div>
-                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                  TGT1 R:R
-                </Label>
-                <Input
-                  data-ocid="settings.tgt1_rr.input"
-                  type="number"
-                  min={1}
-                  max={20}
-                  step={0.5}
-                  value={t1}
-                  onChange={(e) => setT1(e.target.value)}
-                  className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs"
-                />
-              </div>
-              <div>
-                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                  TGT2 R:R
-                </Label>
-                <Input
-                  data-ocid="settings.tgt2_rr.input"
-                  type="number"
-                  min={1}
-                  max={20}
-                  step={0.5}
-                  value={t2}
-                  onChange={(e) => setT2(e.target.value)}
-                  className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs"
-                />
-              </div>
-            </div>
-            <div className="pt-1 flex justify-between items-center">
-              <p className="text-[10px] text-muted-foreground">
-                SL: {sl}% · Trailing: {tg}% · TGT1: 1:{t1}R · TGT2: 1:{t2}R
-              </p>
-              <Button
-                data-ocid="settings.save.button"
-                size="sm"
-                onClick={saveTradeSettings}
-                className="h-7 text-xs"
-              >
-                Save
-              </Button>
-            </div>
-          </SettingsTabsContent>
 
           <SettingsTabsContent value="accounts" className="mt-0">
             <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
@@ -916,18 +780,10 @@ function SettingsModal({
                   style={{ background: "oklch(var(--secondary))" }}
                 >
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs font-semibold text-foreground truncate">
-                      {acc.name}
-                    </p>
-                    <p className="text-[10px] text-muted-foreground font-mono truncate">
-                      {acc.apiKey.slice(0, 8)}••••
+                    <p className="text-xs font-semibold text-foreground truncate font-mono">
+                      ••••••{acc.token.slice(-6)}
                     </p>
                   </div>
-                  {acc.apiKey === currentApiKey && (
-                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-primary/20 text-primary border border-primary/30">
-                      ACTIVE
-                    </span>
-                  )}
                   {deleteConfirm === acc.id ? (
                     <div className="flex gap-1">
                       <button
@@ -972,69 +828,37 @@ function SettingsModal({
             {showAddForm ? (
               <div className="mt-3 space-y-2 border-t border-border pt-3">
                 <p className="text-xs font-semibold text-foreground">
-                  Add Account
+                  Add Token
                 </p>
-                {[
-                  {
-                    key: "name",
-                    label: "Account Name",
-                    placeholder: "Main Account",
-                  },
-                  {
-                    key: "apiKey",
-                    label: "API Key",
-                    placeholder: "your-api-key",
-                  },
-                  {
-                    key: "apiSecret",
-                    label: "API Secret",
-                    placeholder: "your-api-secret",
-                  },
-                  {
-                    key: "redirectUri",
-                    label: "Redirect URI",
-                    placeholder: "https://...",
-                  },
-                  {
-                    key: "token",
-                    label: "Access Token (optional)",
-                    placeholder: "",
-                  },
-                ].map(({ key, label, placeholder }) => (
-                  <div key={key}>
-                    <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                      {label}
-                    </Label>
-                    <Input
-                      type={
-                        key === "apiSecret" || key === "token"
-                          ? "password"
-                          : "text"
-                      }
-                      placeholder={placeholder}
-                      value={(newAcc as any)[key]}
-                      onChange={(e) =>
-                        setNewAcc((prev) => ({
-                          ...prev,
-                          [key]: e.target.value,
-                        }))
-                      }
-                      className="h-7 mt-0.5 bg-secondary border-border text-xs font-mono"
-                    />
-                  </div>
-                ))}
+                <div>
+                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                    Access Token
+                  </Label>
+                  <Input
+                    data-ocid="settings.token.input"
+                    type="password"
+                    placeholder="Paste your Upstox access token"
+                    value={newAcc.token}
+                    onChange={(e) => setNewAcc({ token: e.target.value })}
+                    className="h-7 mt-0.5 bg-secondary border-border text-xs font-mono"
+                  />
+                </div>
                 <div className="flex gap-2 pt-1">
                   <Button
+                    data-ocid="settings.save_token.button"
                     size="sm"
                     onClick={addAccount}
                     className="h-7 text-xs flex-1"
                   >
-                    Save Account
+                    Save
                   </Button>
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => setShowAddForm(false)}
+                    onClick={() => {
+                      setShowAddForm(false);
+                      setNewAcc({ token: "" });
+                    }}
                     className="h-7 text-xs"
                   >
                     Cancel
@@ -1102,6 +926,9 @@ function AppHeader({
           <Zap className="w-3.5 h-3.5 text-primary" />
           <span className="font-display font-bold text-xs tracking-wider text-foreground uppercase hidden sm:block">
             Upstox Connect
+          </span>
+          <span className="text-[9px] bg-blue-600 text-white px-1.5 py-0.5 rounded font-bold tracking-wider hidden sm:block">
+            ANALYTICS
           </span>
         </div>
 
@@ -1290,7 +1117,6 @@ function WatchlistPanel({
 const TABS = [
   { value: "overview", label: "Overview", icon: User },
   { value: "funds", label: "Funds", icon: Wallet },
-  { value: "orders", label: "Orders", icon: BookOpen },
   { value: "positions", label: "Positions", icon: Layers },
   { value: "holdings", label: "Holdings", icon: BriefcaseBusiness },
   { value: "options", label: "Options", icon: LineChart },
@@ -1333,2264 +1159,11 @@ function TabNav({
   );
 }
 
-// ─── Orders Tab ───────────────────────────────────────────────────────────────
-// ─── Orders Tab ───────────────────────────────────────────────────────────────
-function OrdersTab({
-  token,
-  prefill,
-  onPrefillConsumed,
-  onBack,
-}: {
-  token: string;
-  prefill?: {
-    instrumentKey?: string;
-    txType?: "BUY" | "SELL";
-    price?: string;
-    quantity?: string;
-    lotSize?: number;
-  } | null;
-  onPrefillConsumed?: () => void;
-  onBack?: () => void;
-}) {
-  // ── Sub-tab state ──
-  const [orderSubTab, setOrderSubTab] = useState<"regular" | "gtt">("regular");
-
-  // ── Regular Order state ──
-  const [instrumentKey, setInstrumentKey] = useState("NSE_EQ|INE848E01016");
-  const [txType, setTxType] = useState<"BUY" | "SELL">("BUY");
-  const [orderType, setOrderType] = useState("MARKET");
-  const [product, setProduct] = useState("D");
-  const [qtyMode, setQtyMode] = useState<"QTY" | "LOTS">("LOTS");
-  const [quantity, setQuantity] = useState("1");
-  const [price, setPrice] = useState("");
-  const [triggerPrice, setTriggerPrice] = useState("");
-  const [validity, setValidity] = useState("DAY");
-  const [placing, setPlacing] = useState(false);
-  const [editingOrderId, setEditingOrderId] = useState<string | null>(null);
-  const [showOrderForm, setShowOrderForm] = useState(false);
-  const [showGttForm, setShowGttForm] = useState(false);
-  const [cancelConfirm, setCancelConfirm] = useState<{
-    orderId: string;
-    type: "regular" | "gtt";
-  } | null>(null);
-  const [orderFormDepth, setOrderFormDepth] = useState<{
-    bids: Array<{ price: number; quantity: number }>;
-    asks: Array<{ price: number; quantity: number }>;
-  } | null>(null);
-  const [orderFormDepthLoading, setOrderFormDepthLoading] = useState(false);
-  const [requiredMargin, setRequiredMargin] = useState<number | null>(null);
-  const [isEstimatedMargin, setIsEstimatedMargin] = useState(false);
-  const [availableMargin, setAvailableMargin] = useState<number | null>(null);
-  const [marginLoading, setMarginLoading] = useState(false);
-  const [orders, setOrders] = useState<Order[]>([]);
-  const [loadingOrders, setLoadingOrders] = useState(false);
-  const [orderStatusFilter, setOrderStatusFilter] = useState<
-    "ALL" | "PENDING" | "SUCCESS" | "CANCELLED"
-  >("ALL");
-
-  // ── GTT state ──
-  const [gttOrders, setGttOrders] = useState<any[]>([]);
-  const [gttLoading, setGttLoading] = useState(false);
-  const [gttStatusFilter, setGttStatusFilter] = useState<
-    "ALL" | "OPEN" | "TRIGGERED" | "CANCELLED"
-  >("ALL");
-  const [gttType, setGttType] = useState<"SINGLE" | "MULTIPLE">("MULTIPLE");
-  const [gttInstrumentToken, setGttInstrumentToken] = useState("");
-  const [gttTxType, setGttTxType] = useState<"BUY" | "SELL">("BUY");
-  const [gttProduct, setGttProduct] = useState("D");
-  const [gttQty, setGttQty] = useState("1");
-  const [gttQtyMode, setGttQtyMode] = useState<"LOTS" | "QTY">("LOTS");
-  const [gttLotSize, setGttLotSize] = useState<string>("");
-  const [gttDepth, setGttDepth] = useState<{
-    bids: MarketDepthEntry[];
-    asks: MarketDepthEntry[];
-  } | null>(null);
-  const [gttDepthLoading, setGttDepthLoading] = useState(false);
-  const [gttEntryPrice, setGttEntryPrice] = useState("");
-  const [gttEntryTriggerType, setGttEntryTriggerType] = useState<
-    "ABOVE" | "BELOW"
-  >("ABOVE");
-  const [gttTargetPrice, setGttTargetPrice] = useState("");
-  const [gttSlPrice, setGttSlPrice] = useState("");
-  const [gttTrailingGap, setGttTrailingGap] = useState("");
-  const [gttEditId, setGttEditId] = useState<string | null>(null);
-  const [gttPlacing, setGttPlacing] = useState(false);
-  const [gttRowDepthOpen, setGttRowDepthOpen] = useState<Set<string>>(
-    new Set(),
-  );
-  const [gttRowDepthData, setGttRowDepthData] = useState<
-    Record<
-      string,
-      { bids: MarketDepthEntry[]; asks: MarketDepthEntry[] } | null
-    >
-  >({});
-  const [prefillLotSize, setPrefillLotSize] = useState<number | null>(null);
-  const [prefillPrice, setPrefillPrice] = useState("");
-  const [editableLotSize, setEditableLotSize] = useState<string>("");
-
-  // ── Regular order fetching ──
-  const fetchOrders = useCallback(async () => {
-    setLoadingOrders(true);
-    const res = await upstoxFetch<Order[]>("/v2/order/retrieve-all", token);
-    if (res.data) setOrders(Array.isArray(res.data) ? res.data : []);
-    else if (res.error) toast.error(`Orders: ${res.error}`);
-    setLoadingOrders(false);
-  }, [token]);
-
-  useEffect(() => {
-    fetchOrders();
-  }, [fetchOrders]);
-
-  // ── Market depth for order form ──
-  useEffect(() => {
-    if (!token || !instrumentKey) return;
-    let cancelled = false;
-    const parseDepth = (quote: any) => {
-      if (!quote?.depth) return null;
-      return {
-        bids: (quote.depth.buy || [])
-          .slice(0, 5)
-          .map((b: any) => ({ price: b.price, quantity: b.quantity })),
-        asks: (quote.depth.sell || [])
-          .slice(0, 5)
-          .map((a: any) => ({ price: a.price, quantity: a.quantity })),
-      };
-    };
-    const fetchDepth = async () => {
-      try {
-        const encoded = encodeURIComponent(instrumentKey);
-        const res = await fetch(
-          `https://api.upstox.com/v2/market-quote/depth?instrument_key=${encoded}`,
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              Accept: "application/json",
-            },
-          },
-        );
-        const data = await res.json();
-        if (!cancelled && data?.data) {
-          const quote =
-            data.data[instrumentKey] ||
-            data.data[decodeURIComponent(instrumentKey)] ||
-            (Object.values(data.data)[0] as any);
-          const depth = parseDepth(quote);
-          if (depth) {
-            setOrderFormDepth(depth);
-            setOrderFormDepthLoading(false);
-            return;
-          }
-        }
-        const res2 = await fetch(
-          `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${encoded}`,
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              Accept: "application/json",
-            },
-          },
-        );
-        const data2 = await res2.json();
-        if (!cancelled && data2?.data) {
-          const quote2 =
-            data2.data[instrumentKey] ||
-            data2.data[decodeURIComponent(instrumentKey)] ||
-            (Object.values(data2.data)[0] as any);
-          const depth2 = parseDepth(quote2);
-          if (depth2) {
-            setOrderFormDepth(depth2);
-            setOrderFormDepthLoading(false);
-            return;
-          }
-        }
-        if (!cancelled) setOrderFormDepthLoading(false);
-      } catch {
-        if (!cancelled) setOrderFormDepthLoading(false);
-      }
-    };
-    setOrderFormDepthLoading(true);
-    fetchDepth();
-    const interval = setInterval(fetchDepth, 1000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [token, instrumentKey]);
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: prefill is intentional one-shot
-  useEffect(() => {
-    if (prefill) {
-      // @ts-ignore
-      const isGttMode = !!(prefill as any).gttMode;
-      if (isGttMode) {
-        // Switch to GTT sub-tab and prefill GTT form
-        setOrderSubTab("gtt");
-        setShowGttForm(true);
-        if (prefill.instrumentKey) setGttInstrumentToken(prefill.instrumentKey);
-        if (prefill.txType) setGttTxType(prefill.txType as "BUY" | "SELL");
-        if (prefill.price) setGttEntryPrice(prefill.price);
-        if (prefill.quantity) setGttQty(prefill.quantity);
-        if (prefill.lotSize) setGttLotSize(String(prefill.lotSize));
-      } else {
-        setShowOrderForm(true);
-        if (prefill.instrumentKey) {
-          setInstrumentKey(prefill.instrumentKey);
-          // Also sync to GTT instrument token so switching tabs carries the key
-          setGttInstrumentToken(prefill.instrumentKey);
-        }
-        if (prefill.txType) setTxType(prefill.txType);
-        if (prefill.price) {
-          setPrice(prefill.price);
-          setPrefillPrice(prefill.price);
-          setOrderType("LIMIT");
-        }
-        if (prefill.quantity) setQuantity(prefill.quantity);
-        if (prefill.lotSize) {
-          setPrefillLotSize(prefill.lotSize);
-          setEditableLotSize(String(prefill.lotSize));
-        } else {
-          setPrefillLotSize(null);
-          setEditableLotSize("");
-        }
-      }
-      onPrefillConsumed?.();
-    }
-  }, [prefill]);
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional reset
-  useEffect(() => {
-    if (qtyMode === "LOTS") setQuantity("1");
-  }, [instrumentKey, qtyMode]);
-
-  useEffect(() => {
-    if (!token) return;
-    upstoxFetch<any>("/v2/user/get-funds-and-margin", token).then((res) => {
-      if (res.data) {
-        const d = res.data?.equity ?? res.data;
-        setAvailableMargin(d.available_margin ?? d.available_balance ?? 0);
-      }
-    });
-  }, [token]);
-
-  useEffect(() => {
-    if (!token || !instrumentKey || !quantity) return;
-    const actualQty =
-      qtyMode === "LOTS"
-        ? Number.parseInt(quantity || "1") * getLotSize(instrumentKey)
-        : Number.parseInt(quantity || "0");
-    if (!actualQty) return;
-    const timer = setTimeout(async () => {
-      setMarginLoading(true);
-      try {
-        const res = await upstoxFetch<any>("/v2/order/margin", token, {
-          method: "POST",
-          body: [
-            {
-              instrument_key: instrumentKey,
-              transaction_type: txType,
-              quantity: actualQty,
-              price: Number.parseFloat(price) || 0,
-              product,
-              order_type: orderType,
-            },
-          ],
-        });
-        if (res.data?.required_margin !== undefined)
-          setRequiredMargin(res.data.required_margin);
-        else if (
-          Array.isArray(res.data) &&
-          res.data[0]?.required_margin !== undefined
-        ) {
-          setRequiredMargin(res.data[0].required_margin);
-          setIsEstimatedMargin(false);
-        } else {
-          const ltpFallback =
-            Number.parseFloat(price) || Number.parseFloat(prefillPrice) || 0;
-          const actualQtyFallback =
-            qtyMode === "LOTS"
-              ? Number.parseInt(quantity || "1") * getLotSize(instrumentKey)
-              : Number.parseInt(quantity || "0");
-          if (ltpFallback > 0 && actualQtyFallback > 0) {
-            setRequiredMargin(actualQtyFallback * ltpFallback);
-            setIsEstimatedMargin(true);
-          }
-        }
-      } catch {
-        const ltpFallback =
-          Number.parseFloat(price) || Number.parseFloat(prefillPrice) || 0;
-        const actualQtyFallback =
-          qtyMode === "LOTS"
-            ? Number.parseInt(quantity || "1") * getLotSize(instrumentKey)
-            : Number.parseInt(quantity || "0");
-        if (ltpFallback > 0 && actualQtyFallback > 0) {
-          setRequiredMargin(actualQtyFallback * ltpFallback);
-          setIsEstimatedMargin(true);
-        }
-      }
-      setMarginLoading(false);
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [
-    token,
-    instrumentKey,
-    txType,
-    orderType,
-    product,
-    quantity,
-    price,
-    prefillPrice,
-    qtyMode,
-  ]);
-
-  // ── GTT fetching ──
-  const fetchGTTOrders = useCallback(async () => {
-    try {
-      setGttLoading(true);
-      const res = await fetch("https://api.upstox.com/v3/order/gtt", {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: "application/json",
-        },
-      });
-      const json = await res.json();
-      setGttOrders(json?.data || []);
-    } catch {
-      // silently ignore
-    } finally {
-      setGttLoading(false);
-    }
-  }, [token]);
-
-  useEffect(() => {
-    if (orderSubTab !== "gtt") return;
-    fetchGTTOrders();
-  }, [orderSubTab, fetchGTTOrders]);
-
-  // ── Place / modify regular order (v2 API) ──
-  const placeOrder = async () => {
-    if (!instrumentKey.trim() || !quantity) {
-      toast.error("Instrument key and quantity are required");
-      return;
-    }
-    setPlacing(true);
-    // Fetch real lot_size from Upstox market quotes API (authoritative source)
-    const parsedEditableLotSize = Number.parseInt(editableLotSize || "0");
-    let lotSize =
-      parsedEditableLotSize > 0
-        ? parsedEditableLotSize
-        : (prefillLotSize ?? getLotSize(instrumentKey));
-    try {
-      const qRes = await fetch(
-        `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${encodeURIComponent(instrumentKey.trim())}`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: "application/json",
-          },
-        },
-      );
-      if (qRes.ok) {
-        const qJson = await qRes.json();
-        const contractData = qJson?.data?.[instrumentKey.trim()];
-        if (contractData?.lot_size && Number(contractData.lot_size) > 0) {
-          lotSize = Number(contractData.lot_size);
-        }
-      }
-    } catch (_) {
-      /* use fallback lotSize */
-    }
-    const lotsEntered = Number.parseInt(quantity || "1");
-    const rawQty =
-      qtyMode === "LOTS"
-        ? lotsEntered * lotSize
-        : Number.parseInt(quantity, 10);
-    // Ensure quantity is a multiple of lot size
-    const actualQty = Math.round(rawQty / lotSize) * lotSize;
-    if (actualQty <= 0) {
-      toast.error(`Quantity must be at least 1 lot (${lotSize} units)`);
-      setPlacing(false);
-      return;
-    }
-    if (rawQty !== actualQty) {
-      toast.info(
-        `Quantity rounded to ${actualQty} (multiple of lot size ${lotSize})`,
-      );
-    }
-    const parsedPrice = Number.parseFloat(price) || 0;
-    const parsedTrigger = Number.parseFloat(triggerPrice) || 0;
-
-    if ((orderType === "SL" || orderType === "SL-M") && parsedTrigger <= 0) {
-      toast.error("Trigger price is required for SL/SL-M orders");
-      setPlacing(false);
-      return;
-    }
-
-    try {
-      if (editingOrderId) {
-        const modifyBody: any = {
-          order_id: editingOrderId,
-          quantity: actualQty,
-          validity,
-          price: orderType === "MARKET" ? 0 : parsedPrice,
-          order_type: orderType,
-          disclosed_quantity: 0,
-          trigger_price:
-            orderType === "SL" || orderType === "SL-M" ? parsedTrigger : 0,
-        };
-        const res = await fetch("https://api.upstox.com/v2/order/modify", {
-          method: "PUT",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-          body: JSON.stringify(modifyBody),
-        });
-        const json = await res.json();
-        if (res.ok) {
-          toast.success(`Order modified: ${editingOrderId}`);
-          setEditingOrderId(null);
-          fetchOrders();
-        } else {
-          toast.error(
-            `Modify failed: ${
-              json?.errors?.[0]?.message ||
-              json?.message ||
-              `HTTP ${res.status}`
-            }`,
-          );
-        }
-      } else {
-        toast.info(
-          `Placing: ${instrumentKey} | qty: ${actualQty} | lotSize: ${lotSize} | edit: ${editableLotSize || "auto"}`,
-          { duration: 3000 },
-        );
-        const body: any = {
-          instrument_key: instrumentKey.trim(),
-          instrument_token: instrumentKey.trim(),
-          transaction_type: txType,
-          order_type: orderType,
-          product,
-          quantity: actualQty,
-          price: orderType === "MARKET" ? 0 : parsedPrice,
-          trigger_price:
-            orderType === "SL" || orderType === "SL-M" ? parsedTrigger : 0,
-          disclosed_quantity: 0,
-          validity,
-          is_amo: false,
-        };
-        const res = await fetch("https://api.upstox.com/v2/order/place", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-          body: JSON.stringify(body),
-        });
-        const json = await res.json();
-        if (res.ok) {
-          toast.success(`Order placed! ID: ${json?.data?.order_id ?? "—"}`);
-          setShowOrderForm(false);
-          fetchOrders();
-        } else {
-          const errMsg = `HTTP ${res.status}: ${JSON.stringify(json)}`;
-          toast.error(`Order failed: ${errMsg}`, { duration: 8000 });
-        }
-      }
-    } catch (e: any) {
-      toast.error(`Order error: ${e.message ?? "Network error"}`);
-    }
-    setPlacing(false);
-  };
-
-  const cancelRegularOrder = async (orderId: string) => {
-    try {
-      const res = await fetch(
-        `https://api.upstox.com/v2/order/cancel?order_id=${orderId}`,
-        {
-          method: "DELETE",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-        },
-      );
-      const json = await res.json();
-      if (res.ok) {
-        toast.success(`Order cancelled: ${orderId}`);
-        fetchOrders();
-      } else {
-        toast.error(
-          `Cancel failed: ${
-            json?.errors?.[0]?.message || json?.message || `HTTP ${res.status}`
-          }`,
-        );
-      }
-    } catch (e: any) {
-      toast.error(`Cancel error: ${e.message}`);
-    }
-  };
-
-  const startEditOrder = (order: Order) => {
-    setEditingOrderId(order.order_id);
-    if (order.instrument_token) setInstrumentKey(order.instrument_token);
-    setTxType(order.transaction_type as "BUY" | "SELL");
-    setOrderType(order.order_type || "MARKET");
-    setProduct(order.product || "D");
-    setQtyMode("QTY");
-    setQuantity(String(order.quantity || 1));
-    setPrice(String(order.price || ""));
-    setTriggerPrice(String(order.trigger_price || ""));
-    setOrderSubTab("regular");
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  };
-
-  // ── GTT operations ──
-  const resetGttForm = () => {
-    setGttInstrumentToken("");
-    setGttEntryPrice("");
-    setGttTargetPrice("");
-    setGttSlPrice("");
-    setGttTrailingGap("");
-    setGttQty("1");
-    setGttQtyMode("LOTS");
-    setGttLotSize("");
-    setGttDepth(null);
-    setGttEditId(null);
-    setShowGttForm(false);
-  };
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: interval-based depth fetch
-  useEffect(() => {
-    if (!gttInstrumentToken.trim() || orderSubTab !== "gtt") return;
-    if (!token) return;
-
-    let cancelled = false;
-    const fetchGttDepth = async () => {
-      try {
-        setGttDepthLoading(true);
-        const encoded = encodeURIComponent(gttInstrumentToken);
-        const res = await fetch(
-          `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${encoded}`,
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json",
-            },
-          },
-        );
-        if (!res.ok) return;
-        const d = await res.json();
-        const key = Object.keys(d?.data ?? {})[0];
-        const depthData = d?.data?.[key]?.depth;
-        if (depthData && !cancelled) {
-          const bids = (depthData.buy || []).slice(0, 5).map((b: any) => ({
-            price: b.price,
-            quantity: b.quantity,
-            orders: b.orders,
-          }));
-          const asks = (depthData.sell || []).slice(0, 5).map((a: any) => ({
-            price: a.price,
-            quantity: a.quantity,
-            orders: a.orders,
-          }));
-          setGttDepth({ bids, asks });
-        }
-      } catch {
-      } finally {
-        if (!cancelled) setGttDepthLoading(false);
-      }
-    };
-    fetchGttDepth();
-    const id = setInterval(fetchGttDepth, 1000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [gttInstrumentToken, orderSubTab, token]);
-
-  const submitGTTOrder = async () => {
-    if (!gttInstrumentToken.trim() || !gttEntryPrice) {
-      toast.error("Instrument token and entry price are required");
-      return;
-    }
-    const effectiveLotSize =
-      Number.parseInt(gttLotSize || "0") > 0
-        ? Number.parseInt(gttLotSize)
-        : getLotSize(gttInstrumentToken);
-    const rawQty =
-      gttQtyMode === "LOTS"
-        ? Number.parseInt(gttQty || "1") * effectiveLotSize
-        : Number.parseInt(gttQty || String(effectiveLotSize));
-    const actualQty = Math.round(rawQty / effectiveLotSize) * effectiveLotSize;
-    setGttPlacing(true);
-    const rules: any[] = [];
-    rules.push({
-      strategy: "ENTRY",
-      trigger_type: gttEntryTriggerType,
-      trigger_price: Number.parseFloat(gttEntryPrice),
-    });
-    if (gttType === "MULTIPLE") {
-      if (!gttTargetPrice || !gttSlPrice) {
-        toast.error("Target and SL price required for MULTIPLE type");
-        setGttPlacing(false);
-        return;
-      }
-      rules.push({
-        strategy: "TARGET",
-        trigger_type: "IMMEDIATE",
-        trigger_price: Number.parseFloat(gttTargetPrice),
-      });
-      const slRule: any = {
-        strategy: "STOPLOSS",
-        trigger_type: "IMMEDIATE",
-        trigger_price: Number.parseFloat(gttSlPrice),
-      };
-      if (gttTrailingGap)
-        slRule.trailing_gap = Number.parseFloat(gttTrailingGap);
-      rules.push(slRule);
-    }
-    try {
-      if (gttEditId) {
-        const res = await fetch("https://api.upstox.com/v3/order/gtt/modify", {
-          method: "PUT",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-          body: JSON.stringify({
-            type: gttType,
-            quantity: actualQty,
-            rules,
-            gtt_order_id: gttEditId,
-          }),
-        });
-        const json = await res.json();
-        if (res.ok) {
-          toast.success(`GTT updated: ${gttEditId}`);
-          resetGttForm();
-        } else {
-          toast.error(
-            `GTT modify failed: ${
-              json?.errors?.[0]?.message ||
-              json?.errors?.[0]?.reason ||
-              json?.message ||
-              json?.error ||
-              `HTTP ${res.status}: ${JSON.stringify(json).slice(0, 200)}`
-            }`,
-          );
-        }
-      } else {
-        const res = await fetch("https://api.upstox.com/v3/order/gtt/place", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-          body: JSON.stringify({
-            type: gttType,
-            quantity: actualQty,
-            product: gttProduct,
-            rules,
-            instrument_token: gttInstrumentToken,
-            transaction_type: gttTxType,
-          }),
-        });
-        const json = await res.json();
-        if (res.ok) {
-          toast.success(`GTT placed! ID: ${json?.data?.gtt_order_id ?? "—"}`);
-          resetGttForm();
-          setShowOrderForm(false);
-        } else {
-          toast.error(
-            `GTT failed: ${
-              json?.errors?.[0]?.message ||
-              json?.errors?.[0]?.reason ||
-              json?.message ||
-              json?.error ||
-              `HTTP ${res.status}: ${JSON.stringify(json).slice(0, 200)}`
-            }`,
-          );
-        }
-      }
-      fetchGTTOrders();
-    } catch (e: any) {
-      toast.error(`GTT error: ${e.message ?? "Network error"}`);
-    }
-    setGttPlacing(false);
-  };
-
-  const cancelGTTOrder = async (gttOrderId: string) => {
-    try {
-      const res = await fetch("https://api.upstox.com/v3/order/gtt/cancel", {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({ gtt_order_id: gttOrderId }),
-      });
-      const json = await res.json();
-      if (res.ok) {
-        toast.success(`GTT cancelled: ${gttOrderId}`);
-        fetchGTTOrders();
-      } else {
-        toast.error(
-          `GTT cancel failed: ${
-            json?.errors?.[0]?.message || json?.message || `HTTP ${res.status}`
-          }`,
-        );
-      }
-    } catch (e: any) {
-      toast.error(`GTT cancel error: ${e.message}`);
-    }
-  };
-
-  const fetchGttRowDepth = async (
-    gttOrderId: string,
-    instrumentToken: string,
-  ) => {
-    if (!token || !instrumentToken) return;
-    try {
-      const encoded = encodeURIComponent(instrumentToken);
-      const res = await fetch(
-        `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${encoded}`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        },
-      );
-      if (!res.ok) return;
-      const d = await res.json();
-      const key = Object.keys(d?.data ?? {})[0];
-      const depthData = d?.data?.[key]?.depth;
-      if (depthData) {
-        const bids = (depthData.buy || []).slice(0, 5).map((b: any) => ({
-          price: b.price,
-          quantity: b.quantity,
-          orders: b.orders,
-        }));
-        const asks = (depthData.sell || []).slice(0, 5).map((a: any) => ({
-          price: a.price,
-          quantity: a.quantity,
-          orders: a.orders,
-        }));
-        setGttRowDepthData((prev) => ({
-          ...prev,
-          [gttOrderId]: { bids, asks },
-        }));
-      }
-    } catch {
-      /* ignore */
-    }
-  };
-
-  const toggleGttRowDepth = (gttOrderId: string, instrumentToken: string) => {
-    setGttRowDepthOpen((prev) => {
-      const next = new Set(prev);
-      if (next.has(gttOrderId)) {
-        next.delete(gttOrderId);
-      } else {
-        next.add(gttOrderId);
-        fetchGttRowDepth(gttOrderId, instrumentToken);
-      }
-      return next;
-    });
-  };
-
-  const startEditGTT = (gtt: any) => {
-    setGttEditId(gtt.gtt_order_id || gtt.id);
-    setGttType(gtt.type || "SINGLE");
-    setGttInstrumentToken(gtt.instrument_token || "");
-    setGttTxType(gtt.transaction_type || "BUY");
-    setGttProduct(gtt.product || "D");
-    setGttQty(String(gtt.quantity || 1));
-    const entryRule = (gtt.rules || []).find(
-      (r: any) => r.strategy === "ENTRY",
-    );
-    if (entryRule) {
-      setGttEntryPrice(String(entryRule.trigger_price || ""));
-      setGttEntryTriggerType(entryRule.trigger_type || "ABOVE");
-    }
-    const tgtRule = (gtt.rules || []).find((r: any) => r.strategy === "TARGET");
-    if (tgtRule) setGttTargetPrice(String(tgtRule.trigger_price || ""));
-    const slRule = (gtt.rules || []).find(
-      (r: any) => r.strategy === "STOPLOSS",
-    );
-    if (slRule) {
-      setGttSlPrice(String(slRule.trigger_price || ""));
-      setGttTrailingGap(String(slRule.trailing_gap || ""));
-    }
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  };
-
-  const statusBadge = (s: string) => {
-    if (s === "COMPLETE") return "bg-green-950 text-gain border-green-800/40";
-    if (s === "REJECTED") return "bg-red-950 text-loss border-red-800/40";
-    if (s === "OPEN" || s === "PENDING")
-      return "bg-amber-950 text-amber-400 border-amber-800/40";
-    return "bg-secondary text-muted-foreground border-border";
-  };
-
-  const isPendingOrder = (o: Order) =>
-    [
-      "open",
-      "pending",
-      "trigger pending",
-      "after market order req received",
-      "modify pending",
-      "cancel pending",
-    ].some((s) => o.status.toLowerCase().includes(s));
-
-  return (
-    <>
-      <div className="space-y-0">
-        {/* Back to Options */}
-        {prefill && onBack && (
-          <div className="px-4 pt-3 pb-1">
-            <button
-              data-ocid="orders.back_button"
-              type="button"
-              onClick={onBack}
-              className="flex items-center gap-1.5 text-xs text-primary hover:underline font-medium"
-            >
-              ← Back to Options
-            </button>
-          </div>
-        )}
-
-        {/* Sub-tab pills */}
-        <div className="flex gap-2 px-4 pt-3 pb-2 border-b border-border">
-          <button
-            data-ocid="orders.regular_tab"
-            type="button"
-            onClick={() => setOrderSubTab("regular")}
-            className={`px-3 py-1.5 rounded text-[11px] font-bold transition-colors ${
-              orderSubTab === "regular"
-                ? "bg-primary text-primary-foreground"
-                : "bg-muted text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            Regular Orders
-          </button>
-          <button
-            data-ocid="orders.gtt_tab"
-            type="button"
-            onClick={() => {
-              setOrderSubTab("gtt");
-              // Sync regular order instrument key into GTT instrument token
-              setGttInstrumentToken((prev) => prev || instrumentKey);
-            }}
-            className={`px-3 py-1.5 rounded text-[11px] font-bold transition-colors ${
-              orderSubTab === "gtt"
-                ? "bg-primary text-primary-foreground"
-                : "bg-muted text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            GTT Orders
-          </button>
-        </div>
-
-        {orderSubTab === "regular" && (
-          <>
-            {/* Order Form */}
-            {showOrderForm && (
-              <>
-                <div className="p-4 border-b border-border">
-                  <div className="flex items-center justify-between mb-3">
-                    <p className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
-                      {editingOrderId
-                        ? `Modify Order · ${editingOrderId.slice(0, 16)}...`
-                        : "Place Order"}
-                    </p>
-                    {editingOrderId && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEditingOrderId(null);
-                          setShowOrderForm(false);
-                          setPrice("");
-                          setTriggerPrice("");
-                        }}
-                        className="text-[10px] text-muted-foreground hover:text-foreground underline"
-                      >
-                        Cancel Edit
-                      </button>
-                    )}
-                  </div>
-
-                  {/* BUY / SELL toggle */}
-                  <div className="flex gap-0 mb-3 rounded overflow-hidden border border-border">
-                    <button
-                      data-ocid="orders.buy_toggle"
-                      type="button"
-                      onClick={() => setTxType("BUY")}
-                      className={`flex-1 py-2 text-xs font-bold transition-colors ${
-                        txType === "BUY"
-                          ? "bg-blue-600 text-white"
-                          : "bg-secondary text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      BUY
-                    </button>
-                    <button
-                      data-ocid="orders.sell_toggle"
-                      type="button"
-                      onClick={() => setTxType("SELL")}
-                      className={`flex-1 py-2 text-xs font-bold transition-colors ${
-                        txType === "SELL"
-                          ? "bg-red-600 text-white"
-                          : "bg-secondary text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      SELL
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-1 gap-2">
-                    <div>
-                      <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                        Instrument Key
-                      </Label>
-                      <Input
-                        data-ocid="orders.instrument_input"
-                        placeholder="NSE_EQ|INE848E01016"
-                        value={instrumentKey}
-                        onChange={(e) => setInstrumentKey(e.target.value)}
-                        className="h-8 mt-1 bg-secondary border-border font-mono text-xs"
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <div className="flex items-center gap-2 mb-1">
-                          <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                            Qty
-                          </Label>
-                          <div className="flex rounded overflow-hidden border border-border text-[9px]">
-                            <button
-                              data-ocid="orders.qty_mode_lots"
-                              type="button"
-                              onClick={() => {
-                                setQtyMode("LOTS");
-                                setQuantity("1");
-                              }}
-                              className={`px-2 py-0.5 font-bold transition-colors ${
-                                qtyMode === "LOTS"
-                                  ? "bg-primary text-primary-foreground"
-                                  : "bg-secondary text-muted-foreground"
-                              }`}
-                            >
-                              LOTS
-                            </button>
-                            <button
-                              data-ocid="orders.qty_mode_qty"
-                              type="button"
-                              onClick={() => {
-                                setQtyMode("QTY");
-                                setQuantity(
-                                  String(
-                                    prefillLotSize ?? getLotSize(instrumentKey),
-                                  ),
-                                );
-                              }}
-                              className={`px-2 py-0.5 font-bold transition-colors ${
-                                qtyMode === "QTY"
-                                  ? "bg-primary text-primary-foreground"
-                                  : "bg-secondary text-muted-foreground"
-                              }`}
-                            >
-                              QTY
-                            </button>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-1">
-                          <button
-                            data-ocid="orders.qty_decrease_button"
-                            type="button"
-                            onClick={() => {
-                              const step =
-                                qtyMode === "LOTS"
-                                  ? 1
-                                  : getLotSize(instrumentKey);
-                              setQuantity(
-                                String(
-                                  Math.max(
-                                    qtyMode === "LOTS" ? 1 : 0,
-                                    Number.parseInt(quantity || "1") - step,
-                                  ),
-                                ),
-                              );
-                            }}
-                            className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
-                          >
-                            −
-                          </button>
-                          <input
-                            data-ocid="orders.qty_input"
-                            type="number"
-                            value={quantity}
-                            onChange={(e) => setQuantity(e.target.value)}
-                            className="h-8 flex-1 bg-secondary border border-border text-foreground text-xs rounded px-2 text-center font-mono min-w-0"
-                            placeholder={qtyMode === "LOTS" ? "1" : "0"}
-                          />
-                          <button
-                            data-ocid="orders.qty_increase_button"
-                            type="button"
-                            onClick={() => {
-                              const step =
-                                qtyMode === "LOTS"
-                                  ? 1
-                                  : getLotSize(instrumentKey);
-                              setQuantity(
-                                String(Number.parseInt(quantity || "0") + step),
-                              );
-                            }}
-                            className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
-                          >
-                            +
-                          </button>
-                        </div>
-                        {(() => {
-                          const effectiveLotSize =
-                            Number.parseInt(editableLotSize || "0") > 0
-                              ? Number.parseInt(editableLotSize)
-                              : (prefillLotSize ?? getLotSize(instrumentKey));
-                          const actualQtyPreview =
-                            qtyMode === "LOTS"
-                              ? Number.parseInt(quantity || "1") *
-                                effectiveLotSize
-                              : Number.parseInt(quantity || "0");
-                          return (
-                            <div className="flex items-center gap-1 mt-1">
-                              <span className="text-[9px] text-muted-foreground">
-                                Lot Size:
-                              </span>
-                              <input
-                                data-ocid="orders.lot_size_input"
-                                type="number"
-                                value={
-                                  editableLotSize !== ""
-                                    ? editableLotSize
-                                    : String(effectiveLotSize)
-                                }
-                                onChange={(e) =>
-                                  setEditableLotSize(e.target.value)
-                                }
-                                className="w-14 h-5 bg-secondary border border-amber-500 text-foreground text-[9px] rounded px-1 text-center font-mono"
-                                title="Edit lot size if order fails with quantity error"
-                              />
-                              <span className="text-[9px] text-muted-foreground">
-                                {qtyMode === "LOTS" ? (
-                                  <> = {actualQtyPreview} units</>
-                                ) : (
-                                  <>lots OK</>
-                                )}
-                              </span>
-                            </div>
-                          );
-                        })()}
-                      </div>
-                      <div>
-                        <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                          Price
-                        </Label>
-                        <Input
-                          data-ocid="orders.price_input"
-                          type="number"
-                          placeholder="0.00"
-                          value={price}
-                          onChange={(e) => setPrice(e.target.value)}
-                          disabled={orderType === "MARKET"}
-                          className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs disabled:opacity-40"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-3 gap-2">
-                      <div>
-                        <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                          Type
-                        </Label>
-                        <select
-                          data-ocid="orders.type_select"
-                          value={orderType}
-                          onChange={(e) => setOrderType(e.target.value)}
-                          className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2 font-mono"
-                        >
-                          <option value="MARKET">MKT</option>
-                          <option value="LIMIT">LMT</option>
-                          <option value="SL">SL</option>
-                          <option value="SL-M">SL-M</option>
-                        </select>
-                      </div>
-                      <div>
-                        <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                          Product
-                        </Label>
-                        <select
-                          data-ocid="orders.product_select"
-                          value={product}
-                          onChange={(e) => setProduct(e.target.value)}
-                          className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2 font-mono"
-                        >
-                          <option value="D">D - NRML/CNC</option>
-                          <option value="I">I - MIS (Intraday)</option>
-                        </select>
-                      </div>
-                      <div>
-                        <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                          Validity
-                        </Label>
-                        <select
-                          value={validity}
-                          onChange={(e) => setValidity(e.target.value)}
-                          className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2 font-mono"
-                        >
-                          <option value="DAY">DAY</option>
-                          <option value="IOC">IOC</option>
-                        </select>
-                      </div>
-                    </div>
-
-                    {(orderType === "SL" || orderType === "SL-M") && (
-                      <div>
-                        <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                          Trigger Price
-                        </Label>
-                        <Input
-                          type="number"
-                          placeholder="0.00"
-                          value={triggerPrice}
-                          onChange={(e) => setTriggerPrice(e.target.value)}
-                          className="h-8 mt-1 bg-secondary border-border font-mono-data text-xs"
-                        />
-                      </div>
-                    )}
-
-                    <button
-                      data-ocid="orders.submit_button"
-                      type="button"
-                      onClick={placeOrder}
-                      disabled={placing}
-                      className={`w-full h-9 rounded text-xs font-bold transition-colors flex items-center justify-center gap-1.5 ${
-                        txType === "BUY"
-                          ? "bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
-                          : "bg-red-600 hover:bg-red-700 text-white disabled:opacity-50"
-                      }`}
-                    >
-                      {placing && <Loader2 className="w-3 h-3 animate-spin" />}
-                      {editingOrderId ? "Modify" : txType} {orderType}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Market Depth in Order Form */}
-                <div className="mx-4 mb-3 border border-border rounded">
-                  <div className="flex items-center justify-between px-2 py-1 border-b border-border bg-secondary/50">
-                    <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
-                      Market Depth
-                    </span>
-                    {orderFormDepthLoading && (
-                      <span className="text-[9px] text-muted-foreground">
-                        Loading...
-                      </span>
-                    )}
-                  </div>
-                  {!orderFormDepthLoading && !orderFormDepth && (
-                    <div className="px-3 py-2 text-[10px] text-muted-foreground italic">
-                      Depth unavailable (CORS/API)
-                    </div>
-                  )}
-                  <div className="grid grid-cols-2 divide-x divide-border">
-                    <div>
-                      <div className="grid grid-cols-2 px-2 py-0.5 border-b border-border">
-                        <span className="text-[9px] text-muted-foreground">
-                          BID QTY
-                        </span>
-                        <span className="text-[9px] text-muted-foreground text-right">
-                          BID
-                        </span>
-                      </div>
-                      {(orderFormDepth?.bids || Array(5).fill(null)).map(
-                        (b, i) => (
-                          <div
-                            key={b ? `bid-p-${b.price}` : `bid-e-${i}`}
-                            className="grid grid-cols-2 px-2 py-0.5"
-                          >
-                            <span className="text-[10px] text-green-500 font-mono">
-                              {b ? b.quantity : "—"}
-                            </span>
-                            <span className="text-[10px] text-green-500 font-mono text-right">
-                              {b ? b.price.toFixed(2) : "—"}
-                            </span>
-                          </div>
-                        ),
-                      )}
-                    </div>
-                    <div>
-                      <div className="grid grid-cols-2 px-2 py-0.5 border-b border-border">
-                        <span className="text-[9px] text-muted-foreground">
-                          ASK
-                        </span>
-                        <span className="text-[9px] text-muted-foreground text-right">
-                          ASK QTY
-                        </span>
-                      </div>
-                      {(orderFormDepth?.asks || Array(5).fill(null)).map(
-                        (a, i) => (
-                          <div
-                            key={a ? `ask-p-${a.price}` : `ask-e-${i}`}
-                            className="grid grid-cols-2 px-2 py-0.5"
-                          >
-                            <span className="text-[10px] text-red-500 font-mono">
-                              {a ? a.price.toFixed(2) : "—"}
-                            </span>
-                            <span className="text-[10px] text-red-500 font-mono text-right">
-                              {a ? a.quantity : "—"}
-                            </span>
-                          </div>
-                        ),
-                      )}
-                    </div>
-                  </div>
-                  {orderFormDepth && (
-                    <div className="px-2 py-1 border-t border-border">
-                      {(() => {
-                        const totalBid = orderFormDepth.bids.reduce(
-                          (s, b) => s + b.quantity,
-                          0,
-                        );
-                        const totalAsk = orderFormDepth.asks.reduce(
-                          (s, a) => s + a.quantity,
-                          0,
-                        );
-                        const total = totalBid + totalAsk || 1;
-                        const bidPct = Math.round((totalBid / total) * 100);
-                        return (
-                          <div>
-                            <div className="flex justify-between text-[9px] mb-0.5">
-                              <span className="text-green-500">
-                                Buy {bidPct}%
-                              </span>
-                              <span className="text-red-500">
-                                Sell {100 - bidPct}%
-                              </span>
-                            </div>
-                            <div className="h-1 rounded-full bg-red-500 overflow-hidden">
-                              <div
-                                className="h-full bg-green-500 rounded-full"
-                                style={{ width: `${bidPct}%` }}
-                              />
-                            </div>
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  )}
-                </div>
-
-                {/* Margin Info */}
-                <div
-                  data-ocid="orders.margin_panel"
-                  className="mx-4 mb-3 border border-border rounded"
-                >
-                  <div className="px-2 py-1 border-b border-border bg-secondary/50">
-                    <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
-                      Margin
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-2 divide-x divide-border">
-                    <div className="px-3 py-2">
-                      <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">
-                        {isEstimatedMargin ? "Est. Margin" : "Req. Margin"}
-                      </div>
-                      <div
-                        data-ocid="orders.required_margin"
-                        className="text-xs font-mono font-bold text-amber-400"
-                      >
-                        {marginLoading
-                          ? "..."
-                          : requiredMargin !== null
-                            ? `₹${requiredMargin.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                            : "—"}
-                      </div>
-                    </div>
-                    <div className="px-3 py-2">
-                      <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">
-                        Available
-                      </div>
-                      <div
-                        data-ocid="orders.available_margin"
-                        className={`text-xs font-mono font-bold ${
-                          availableMargin !== null &&
-                          requiredMargin !== null &&
-                          availableMargin < requiredMargin
-                            ? "text-red-500"
-                            : "text-green-500"
-                        }`}
-                      >
-                        {availableMargin !== null
-                          ? `₹${availableMargin.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                          : "—"}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </>
-            )}
-
-            {/* Order Book */}
-            <div className="p-3">
-              <div className="flex items-center justify-between mb-2">
-                <p className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
-                  Order Book
-                </p>
-                <div className="flex items-center gap-2">
-                  {!showOrderForm && (
-                    <button
-                      type="button"
-                      data-ocid="orders.new_order_button"
-                      onClick={() => setShowOrderForm(true)}
-                      className="flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold bg-primary text-primary-foreground hover:opacity-90 transition-opacity"
-                    >
-                      <Plus className="w-3 h-3" /> New Order
-                    </button>
-                  )}
-                  {showOrderForm && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowOrderForm(false);
-                        setEditingOrderId(null);
-                      }}
-                      className="flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold bg-secondary text-muted-foreground hover:text-foreground transition-colors"
-                    >
-                      <X className="w-3 h-3" /> Hide Form
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={fetchOrders}
-                    className="w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground"
-                  >
-                    <RefreshCw
-                      className={`w-3 h-3 ${loadingOrders ? "animate-spin" : ""}`}
-                    />
-                  </button>
-                </div>
-              </div>
-
-              {/* Filter tabs */}
-              <div className="flex gap-1 mb-2 overflow-x-auto hide-scrollbar">
-                {(["ALL", "PENDING", "SUCCESS", "CANCELLED"] as const).map(
-                  (f) => (
-                    <button
-                      key={f}
-                      type="button"
-                      data-ocid={`orders.filter.${f.toLowerCase()}.tab`}
-                      onClick={() => setOrderStatusFilter(f)}
-                      className={`flex-none px-2.5 py-1 rounded text-[10px] font-bold whitespace-nowrap transition-colors ${
-                        orderStatusFilter === f
-                          ? "bg-primary text-primary-foreground"
-                          : "bg-secondary text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      {f === "SUCCESS" ? "FILLED" : f}
-                    </button>
-                  ),
-                )}
-              </div>
-
-              {loadingOrders ? (
-                <div className="space-y-1.5">
-                  {[1, 2, 3].map((i) => (
-                    <div
-                      key={i}
-                      className="h-8 rounded bg-secondary animate-pulse"
-                    />
-                  ))}
-                </div>
-              ) : orders.length === 0 ? (
-                <div
-                  data-ocid="orders.empty_state"
-                  className="py-8 text-center"
-                >
-                  <p className="text-xs text-muted-foreground">No orders</p>
-                </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table
-                    className="w-full text-xs border-collapse min-w-[480px]"
-                    data-ocid="orders.table"
-                  >
-                    <thead>
-                      <tr className="border-b border-border">
-                        <th className="py-1.5 px-2 text-left text-[10px] text-muted-foreground font-semibold tracking-wider">
-                          SYMBOL
-                        </th>
-                        <th className="py-1.5 px-2 text-right text-[10px] text-muted-foreground font-semibold tracking-wider">
-                          QTY
-                        </th>
-                        <th className="py-1.5 px-2 text-right text-[10px] text-muted-foreground font-semibold tracking-wider">
-                          PRICE
-                        </th>
-                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                          TYPE
-                        </th>
-                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                          STATUS
-                        </th>
-                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                          ACT
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {orders
-                        .filter((o) => {
-                          if (orderStatusFilter === "ALL") return true;
-                          if (orderStatusFilter === "PENDING")
-                            return isPendingOrder(o);
-                          if (orderStatusFilter === "SUCCESS")
-                            return ["complete", "traded", "filled"].some((s) =>
-                              o.status.toLowerCase().includes(s),
-                            );
-                          if (orderStatusFilter === "CANCELLED")
-                            return ["cancelled", "rejected"].some((s) =>
-                              o.status.toLowerCase().includes(s),
-                            );
-                          return true;
-                        })
-                        .map((order, i) => (
-                          <tr
-                            key={order.order_id}
-                            data-ocid={`orders.row.${i + 1}`}
-                            className="border-b border-border/50 hover:bg-secondary/40 transition-colors"
-                          >
-                            <td className="py-1.5 px-2">
-                              <p className="font-mono font-bold text-foreground text-xs">
-                                {order.tradingsymbol}
-                              </p>
-                              <p
-                                className={`text-[10px] font-bold ${
-                                  order.transaction_type === "BUY"
-                                    ? "text-blue-400"
-                                    : "text-loss"
-                                }`}
-                              >
-                                {order.transaction_type}
-                              </p>
-                            </td>
-                            <td className="py-1.5 px-2 text-right font-mono-data text-foreground">
-                              {order.quantity}
-                            </td>
-                            <td className="py-1.5 px-2 text-right font-mono-data text-foreground">
-                              ₹
-                              {(
-                                order.price ||
-                                order.average_price ||
-                                0
-                              ).toFixed(2)}
-                            </td>
-                            <td className="py-1.5 px-2 text-center">
-                              <span className="text-[10px] font-mono text-muted-foreground">
-                                {order.order_type}
-                              </span>
-                            </td>
-                            <td className="py-1.5 px-2 text-center">
-                              <span
-                                className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${statusBadge(order.status)}`}
-                              >
-                                {order.status}
-                              </span>
-                            </td>
-                            <td className="py-1.5 px-2 text-center">
-                              {isPendingOrder(order) && (
-                                <div className="flex items-center justify-center gap-1">
-                                  <button
-                                    type="button"
-                                    data-ocid={`orders.edit_button.${i + 1}`}
-                                    onClick={() => startEditOrder(order)}
-                                    title="Edit order"
-                                    className="w-5 h-5 flex items-center justify-center rounded bg-secondary hover:bg-amber-900/40 text-amber-400 transition-colors"
-                                  >
-                                    <Pencil className="w-2.5 h-2.5" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    data-ocid={`orders.cancel_button.${i + 1}`}
-                                    onClick={() =>
-                                      setCancelConfirm({
-                                        orderId: order.order_id,
-                                        type: "regular",
-                                      })
-                                    }
-                                    title="Cancel order"
-                                    className="w-5 h-5 flex items-center justify-center rounded bg-secondary hover:bg-red-900/40 text-red-400 transition-colors"
-                                  >
-                                    <X className="w-2.5 h-2.5" />
-                                  </button>
-                                </div>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </>
-        )}
-
-        {orderSubTab === "gtt" && (
-          <>
-            {/* GTT Order Form — Bracket Order Design */}
-            {(showGttForm || gttEditId) && (
-              <div className="border-b border-border">
-                {/* Colored header bar */}
-                <div
-                  className={`px-4 py-2.5 flex items-center justify-between ${gttTxType === "BUY" ? "bg-blue-600" : "bg-red-600"}`}
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="text-white font-black text-sm">
-                      {gttTxType === "BUY" ? "▲ BUY GTT" : "▼ SELL GTT"}
-                    </span>
-                    <span className="text-white/70 text-[10px] font-bold">
-                      — {gttType}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <button
-                      data-ocid="gtt.buy_button"
-                      type="button"
-                      onClick={() => setGttTxType("BUY")}
-                      className={`px-3 py-1 rounded text-[10px] font-bold transition-colors ${gttTxType === "BUY" ? "bg-white text-blue-700" : "bg-blue-500/40 text-white hover:bg-blue-500/60"}`}
-                    >
-                      BUY
-                    </button>
-                    <button
-                      data-ocid="gtt.sell_button"
-                      type="button"
-                      onClick={() => setGttTxType("SELL")}
-                      className={`px-3 py-1 rounded text-[10px] font-bold transition-colors ${gttTxType === "SELL" ? "bg-white text-red-700" : "bg-red-500/40 text-white hover:bg-red-500/60"}`}
-                    >
-                      SELL
-                    </button>
-                    {gttEditId && (
-                      <button
-                        data-ocid="gtt.cancel_edit_button"
-                        type="button"
-                        onClick={resetGttForm}
-                        className="ml-1 px-2 py-1 rounded text-[10px] bg-white/20 text-white hover:bg-white/30"
-                      >
-                        ✕ Cancel Edit
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                <div className="p-3 space-y-3">
-                  {/* Instrument + Qty row */}
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                        Instrument Token
-                      </Label>
-                      <Input
-                        data-ocid="gtt.instrument_input"
-                        placeholder="NSE_FO|43919"
-                        value={gttInstrumentToken}
-                        onChange={(e) => setGttInstrumentToken(e.target.value)}
-                        className="h-8 mt-1 bg-secondary border-border font-mono text-xs"
-                      />
-                    </div>
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                          Qty
-                        </Label>
-                        <div className="flex rounded overflow-hidden border border-border text-[9px]">
-                          <button
-                            data-ocid="gtt.qty_mode_lots"
-                            type="button"
-                            onClick={() => {
-                              setGttQtyMode("LOTS");
-                              setGttQty("1");
-                            }}
-                            className={`px-2 py-0.5 font-bold transition-colors ${gttQtyMode === "LOTS" ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground"}`}
-                          >
-                            LOTS
-                          </button>
-                          <button
-                            data-ocid="gtt.qty_mode_qty"
-                            type="button"
-                            onClick={() => {
-                              setGttQtyMode("QTY");
-                              setGttQty(String(getLotSize(gttInstrumentToken)));
-                            }}
-                            className={`px-2 py-0.5 font-bold transition-colors ${gttQtyMode === "QTY" ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground"}`}
-                          >
-                            QTY
-                          </button>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <button
-                          data-ocid="gtt.qty_decrease_button"
-                          type="button"
-                          onClick={() => {
-                            const step =
-                              gttQtyMode === "LOTS"
-                                ? 1
-                                : getLotSize(gttInstrumentToken);
-                            setGttQty(
-                              String(
-                                Math.max(
-                                  gttQtyMode === "LOTS" ? 1 : 0,
-                                  Number.parseInt(gttQty || "1") - step,
-                                ),
-                              ),
-                            );
-                          }}
-                          className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
-                        >
-                          −
-                        </button>
-                        <input
-                          data-ocid="gtt.qty_input"
-                          type="number"
-                          value={gttQty}
-                          onChange={(e) => setGttQty(e.target.value)}
-                          className="h-8 flex-1 bg-secondary border border-border text-foreground text-xs rounded px-2 text-center font-mono min-w-0"
-                          placeholder={gttQtyMode === "LOTS" ? "1" : "0"}
-                        />
-                        <button
-                          data-ocid="gtt.qty_increase_button"
-                          type="button"
-                          onClick={() => {
-                            const step =
-                              gttQtyMode === "LOTS"
-                                ? 1
-                                : getLotSize(gttInstrumentToken);
-                            setGttQty(
-                              String(Number.parseInt(gttQty || "0") + step),
-                            );
-                          }}
-                          className="h-8 w-8 bg-secondary border border-border rounded text-xs font-bold hover:bg-muted flex items-center justify-center"
-                        >
-                          +
-                        </button>
-                      </div>
-                      {(() => {
-                        const ls =
-                          Number.parseInt(gttLotSize || "0") > 0
-                            ? Number.parseInt(gttLotSize)
-                            : getLotSize(gttInstrumentToken);
-                        const aq =
-                          gttQtyMode === "LOTS"
-                            ? Number.parseInt(gttQty || "1") * ls
-                            : Number.parseInt(gttQty || String(ls));
-                        return (
-                          <p className="text-[10px] text-muted-foreground mt-0.5">
-                            {gttQtyMode === "LOTS"
-                              ? `= ${aq} qty (lot: ${ls})`
-                              : `= ${Math.floor(aq / ls)} lots (lot: ${ls})`}
-                          </p>
-                        );
-                      })()}
-                      <div className="mt-1">
-                        <Label className="text-[10px] text-amber-400 uppercase tracking-wider">
-                          Lot Override
-                        </Label>
-                        <input
-                          type="number"
-                          value={gttLotSize}
-                          onChange={(e) => setGttLotSize(e.target.value)}
-                          placeholder={String(getLotSize(gttInstrumentToken))}
-                          className="w-full h-7 mt-0.5 bg-secondary border border-amber-500/50 text-foreground text-xs rounded px-2 font-mono"
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Product + GTT Type row */}
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                        Product
-                      </Label>
-                      <select
-                        value={gttProduct}
-                        onChange={(e) => setGttProduct(e.target.value)}
-                        className="w-full h-8 mt-1 bg-secondary border border-border text-foreground text-xs rounded px-2"
-                      >
-                        <option value="D">D (NRML/CNC)</option>
-                        <option value="I">I (MIS)</option>
-                      </select>
-                    </div>
-                    <div>
-                      <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                        Type
-                      </Label>
-                      <div className="flex mt-1 rounded overflow-hidden border border-border">
-                        <button
-                          data-ocid="gtt.type_single_toggle"
-                          type="button"
-                          onClick={() => setGttType("SINGLE")}
-                          className={`flex-1 py-1.5 text-xs font-bold transition-colors ${gttType === "SINGLE" ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:text-foreground"}`}
-                        >
-                          SINGLE
-                        </button>
-                        <button
-                          data-ocid="gtt.type_multiple_toggle"
-                          type="button"
-                          onClick={() => setGttType("MULTIPLE")}
-                          className={`flex-1 py-1.5 text-xs font-bold transition-colors ${gttType === "MULTIPLE" ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:text-foreground"}`}
-                        >
-                          MULTIPLE
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Bracket Order Visual */}
-                  <div className="space-y-1">
-                    {/* TARGET — only for MULTIPLE */}
-                    {gttType === "MULTIPLE" && (
-                      <div className="rounded-lg border border-green-700/50 bg-green-950/40 p-3">
-                        <div className="flex items-center gap-1.5 mb-2">
-                          <span className="text-green-400 font-black text-xs">
-                            ▲ TARGET
-                          </span>
-                          <span className="text-green-600/70 text-[9px]">
-                            Exit with profit
-                          </span>
-                        </div>
-                        <Input
-                          type="number"
-                          placeholder="Target price"
-                          value={gttTargetPrice}
-                          onChange={(e) => setGttTargetPrice(e.target.value)}
-                          className="h-8 bg-green-950/60 border-green-700/60 font-mono text-xs text-green-200 placeholder:text-green-800"
-                        />
-                      </div>
-                    )}
-
-                    {/* Connector line */}
-                    {gttType === "MULTIPLE" && (
-                      <div className="flex justify-center">
-                        <div className="w-px h-3 bg-border" />
-                      </div>
-                    )}
-
-                    {/* ENTRY — always shown */}
-                    <div
-                      className={`rounded-lg border p-3 ${gttTxType === "BUY" ? "border-blue-600/60 bg-blue-950/40" : "border-red-600/60 bg-red-950/30"}`}
-                    >
-                      <div className="flex items-center gap-1.5 mb-2">
-                        <span
-                          className={`font-black text-xs ${gttTxType === "BUY" ? "text-blue-400" : "text-red-400"}`}
-                        >
-                          {gttTxType === "BUY" ? "▲" : "▼"} ENTRY TRIGGER
-                        </span>
-                        <span className="text-muted-foreground text-[9px]">
-                          When price goes
-                        </span>
-                        {/* ABOVE / BELOW toggle inline */}
-                        <div className="flex rounded overflow-hidden border border-border ml-auto">
-                          <button
-                            type="button"
-                            onClick={() => setGttEntryTriggerType("ABOVE")}
-                            className={`px-2 text-[9px] font-bold transition-colors ${gttEntryTriggerType === "ABOVE" ? "bg-blue-600 text-white" : "bg-secondary text-muted-foreground"}`}
-                          >
-                            ↑ ABOVE
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setGttEntryTriggerType("BELOW")}
-                            className={`px-2 text-[9px] font-bold transition-colors ${gttEntryTriggerType === "BELOW" ? "bg-amber-600 text-white" : "bg-secondary text-muted-foreground"}`}
-                          >
-                            ↓ BELOW
-                          </button>
-                        </div>
-                      </div>
-                      <Input
-                        type="number"
-                        placeholder="Entry trigger price"
-                        value={gttEntryPrice}
-                        onChange={(e) => setGttEntryPrice(e.target.value)}
-                        className={`h-9 font-mono text-sm font-bold ${gttTxType === "BUY" ? "bg-blue-950/60 border-blue-700/60 text-blue-200 placeholder:text-blue-800" : "bg-red-950/60 border-red-700/60 text-red-200 placeholder:text-red-800"}`}
-                      />
-                    </div>
-
-                    {/* Connector line */}
-                    {gttType === "MULTIPLE" && (
-                      <div className="flex justify-center">
-                        <div className="w-px h-3 bg-border" />
-                      </div>
-                    )}
-
-                    {/* STOPLOSS — only for MULTIPLE */}
-                    {gttType === "MULTIPLE" && (
-                      <div className="rounded-lg border border-red-700/50 bg-red-950/40 p-3">
-                        <div className="flex items-center gap-1.5 mb-2">
-                          <span className="text-red-400 font-black text-xs">
-                            ▼ STOPLOSS
-                          </span>
-                          <span className="text-red-600/70 text-[9px]">
-                            Exit to limit loss
-                          </span>
-                        </div>
-                        <Input
-                          type="number"
-                          placeholder="Stop-loss price"
-                          value={gttSlPrice}
-                          onChange={(e) => setGttSlPrice(e.target.value)}
-                          className="h-8 mb-2 bg-red-950/60 border-red-700/60 font-mono text-xs text-red-200 placeholder:text-red-800"
-                        />
-                        <div className="flex items-center gap-2">
-                          <span className="text-[10px] text-red-400/80 font-semibold whitespace-nowrap">
-                            Trailing Gap
-                          </span>
-                          <Input
-                            type="number"
-                            placeholder="e.g. 0.1 (optional)"
-                            value={gttTrailingGap}
-                            onChange={(e) => setGttTrailingGap(e.target.value)}
-                            className="h-7 flex-1 bg-red-950/60 border-red-700/60 font-mono text-xs text-red-200 placeholder:text-red-800"
-                          />
-                        </div>
-                        <p className="text-[9px] text-red-600/70 mt-1">
-                          Leave blank for fixed SL. Set trailing gap to
-                          auto-trail.
-                        </p>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Submit button */}
-                  <button
-                    data-ocid="gtt.submit_button"
-                    type="button"
-                    onClick={submitGTTOrder}
-                    disabled={gttPlacing}
-                    className={`w-full h-10 rounded-lg text-sm font-black transition-colors flex items-center justify-center gap-2 ${
-                      gttTxType === "BUY"
-                        ? "bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50"
-                        : "bg-red-600 hover:bg-red-500 text-white disabled:opacity-50"
-                    }`}
-                  >
-                    {gttPlacing && <Loader2 className="w-4 h-4 animate-spin" />}
-                    {gttTxType === "BUY" ? "▲" : "▼"}{" "}
-                    {gttEditId ? "Update GTT Order" : "Place GTT Order"}
-                  </button>
-
-                  {/* Market Depth — always visible */}
-                  <div className="border border-border rounded-lg overflow-hidden">
-                    <div className="px-3 py-2 bg-secondary/50 border-b border-border">
-                      <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">
-                        Market Depth
-                      </span>
-                    </div>
-                    {gttInstrumentToken.trim() ? (
-                      gttDepthLoading && !gttDepth ? (
-                        <div className="h-20 animate-pulse bg-secondary m-2 rounded" />
-                      ) : gttDepth ? (
-                        <div className="p-2">
-                          <DepthRows depth={gttDepth} />
-                        </div>
-                      ) : (
-                        <p className="text-[10px] text-muted-foreground text-center py-4">
-                          No depth data available
-                        </p>
-                      )
-                    ) : (
-                      <p className="text-[10px] text-muted-foreground text-center py-4">
-                        Enter instrument token to load market depth
-                      </p>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-            {/* GTT Order Book */}
-            <div className="p-3">
-              <div className="flex items-center justify-between mb-2">
-                <p className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
-                  GTT Order Book
-                </p>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    data-ocid="gtt.open_modal_button"
-                    type="button"
-                    onClick={() => setShowGttForm((v) => !v)}
-                    className={`flex items-center gap-1 px-2.5 py-1 rounded text-[10px] font-bold transition-colors ${
-                      showGttForm
-                        ? "bg-secondary text-muted-foreground hover:text-foreground"
-                        : "bg-primary text-primary-foreground hover:bg-primary/90"
-                    }`}
-                  >
-                    {showGttForm ? (
-                      <>
-                        <ChevronUp className="w-3 h-3" /> Hide Form
-                      </>
-                    ) : (
-                      <>
-                        <Plus className="w-3 h-3" /> New GTT Order
-                      </>
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={fetchGTTOrders}
-                    className="w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground"
-                  >
-                    <RefreshCw
-                      className={`w-3 h-3 ${gttLoading ? "animate-spin" : ""}`}
-                    />
-                  </button>
-                </div>
-              </div>
-
-              {/* GTT Filter tabs */}
-              <div className="flex gap-1 mb-2 overflow-x-auto hide-scrollbar">
-                {(["ALL", "OPEN", "TRIGGERED", "CANCELLED"] as const).map(
-                  (f) => (
-                    <button
-                      key={f}
-                      type="button"
-                      data-ocid={`gtt.filter.${f.toLowerCase()}.tab`}
-                      onClick={() => setGttStatusFilter(f)}
-                      className={`flex-none px-2.5 py-1 rounded text-[10px] font-bold whitespace-nowrap transition-colors ${
-                        gttStatusFilter === f
-                          ? "bg-primary text-primary-foreground"
-                          : "bg-secondary text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      {f}
-                    </button>
-                  ),
-                )}
-              </div>
-
-              {gttLoading && gttOrders.length === 0 ? (
-                <div className="space-y-1.5">
-                  {[1, 2, 3].map((i) => (
-                    <div
-                      key={i}
-                      className="h-8 rounded bg-secondary animate-pulse"
-                    />
-                  ))}
-                </div>
-              ) : gttOrders.length === 0 ? (
-                <div data-ocid="gtt.empty_state" className="py-8 text-center">
-                  <p className="text-xs text-muted-foreground">No GTT orders</p>
-                  <p className="text-[10px] text-muted-foreground mt-1">
-                    Use the form above to place a GTT order
-                  </p>
-                </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table
-                    className="w-full text-xs border-collapse min-w-[520px]"
-                    data-ocid="gtt.table"
-                  >
-                    <thead>
-                      <tr className="border-b border-border">
-                        <th className="py-1.5 px-2 text-left text-[10px] text-muted-foreground font-semibold tracking-wider">
-                          SYMBOL
-                        </th>
-                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                          B/S
-                        </th>
-                        <th className="py-1.5 px-2 text-right text-[10px] text-muted-foreground font-semibold tracking-wider">
-                          QTY
-                        </th>
-                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                          ENTRY
-                        </th>
-                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                          TGT
-                        </th>
-                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                          SL
-                        </th>
-                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                          STATUS
-                        </th>
-                        <th className="py-1.5 px-2 text-center text-[10px] text-muted-foreground font-semibold tracking-wider">
-                          ACT
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {gttOrders
-                        .filter((gtt) => {
-                          const s = (gtt.status || "").toUpperCase();
-                          if (gttStatusFilter === "ALL") return true;
-                          if (gttStatusFilter === "OPEN")
-                            return ["OPEN", "ACTIVE", "PENDING"].includes(s);
-                          if (gttStatusFilter === "TRIGGERED")
-                            return ["TRIGGERED", "COMPLETE", "FILLED"].includes(
-                              s,
-                            );
-                          if (gttStatusFilter === "CANCELLED")
-                            return s === "CANCELLED";
-                          return true;
-                        })
-                        .map((gtt, i) => {
-                          const entryRule = (gtt.rules || []).find(
-                            (r: any) => r.strategy === "ENTRY",
-                          );
-                          const tgtRule = (gtt.rules || []).find(
-                            (r: any) => r.strategy === "TARGET",
-                          );
-                          const slRule = (gtt.rules || []).find(
-                            (r: any) => r.strategy === "STOPLOSS",
-                          );
-                          const symbol =
-                            (gtt.instrument_token || gtt.tradingsymbol || "—")
-                              .split("|")
-                              .pop() || "—";
-                          return (
-                            <React.Fragment
-                              key={gtt.gtt_order_id || gtt.id || String(i)}
-                            >
-                              <tr
-                                data-ocid={`gtt.row.${i + 1}`}
-                                className="border-b border-border/50 hover:bg-secondary/40 transition-colors"
-                              >
-                                <td className="py-1.5 px-2">
-                                  <p className="font-mono font-bold text-foreground text-xs">
-                                    {symbol}
-                                  </p>
-                                </td>
-                                <td className="py-1.5 px-2 text-center">
-                                  <span
-                                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                                      gtt.transaction_type === "BUY"
-                                        ? "bg-blue-950 text-blue-400 border border-blue-800/40"
-                                        : "bg-red-950 text-red-400 border border-red-800/40"
-                                    }`}
-                                  >
-                                    {gtt.transaction_type === "BUY" ? "B" : "S"}
-                                  </span>
-                                </td>
-                                <td className="py-1.5 px-2 text-right font-mono text-foreground">
-                                  {gtt.quantity}
-                                </td>
-                                <td className="py-1.5 px-2 text-center">
-                                  {entryRule ? (
-                                    <span className="text-[9px] px-1 py-0.5 rounded bg-blue-950 text-blue-400 border border-blue-800/40 font-mono">
-                                      E:{entryRule.trigger_price}
-                                    </span>
-                                  ) : (
-                                    <span className="text-muted-foreground">
-                                      —
-                                    </span>
-                                  )}
-                                </td>
-                                <td className="py-1.5 px-2 text-center">
-                                  {tgtRule ? (
-                                    <span className="text-[9px] px-1 py-0.5 rounded bg-green-950 text-green-400 border border-green-800/40 font-mono">
-                                      T:{tgtRule.trigger_price}
-                                    </span>
-                                  ) : (
-                                    <span className="text-muted-foreground">
-                                      —
-                                    </span>
-                                  )}
-                                </td>
-                                <td className="py-1.5 px-2 text-center">
-                                  {slRule ? (
-                                    <span className="text-[9px] px-1 py-0.5 rounded bg-red-950 text-red-400 border border-red-800/40 font-mono">
-                                      SL:{slRule.trigger_price}
-                                      {slRule.trailing_gap
-                                        ? `(T${slRule.trailing_gap})`
-                                        : ""}
-                                    </span>
-                                  ) : (
-                                    <span className="text-muted-foreground">
-                                      —
-                                    </span>
-                                  )}
-                                </td>
-                                <td className="py-1.5 px-2 text-center">
-                                  <span
-                                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${statusBadge((gtt.status || "").toUpperCase())}`}
-                                  >
-                                    {gtt.status || "ACTIVE"}
-                                  </span>
-                                </td>
-                                <td className="py-1.5 px-2 text-center">
-                                  <div className="flex items-center justify-center gap-1">
-                                    <button
-                                      type="button"
-                                      data-ocid={`gtt.edit_button.${i + 1}`}
-                                      onClick={() => startEditGTT(gtt)}
-                                      title="Edit GTT"
-                                      className="w-5 h-5 flex items-center justify-center rounded bg-secondary hover:bg-amber-900/40 text-amber-400 transition-colors"
-                                    >
-                                      <Pencil className="w-2.5 h-2.5" />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      data-ocid={`gtt.cancel_button.${i + 1}`}
-                                      onClick={() =>
-                                        setCancelConfirm({
-                                          orderId: gtt.gtt_order_id || gtt.id,
-                                          type: "gtt",
-                                        })
-                                      }
-                                      title="Cancel GTT"
-                                      className="w-5 h-5 flex items-center justify-center rounded bg-secondary hover:bg-red-900/40 text-red-400 transition-colors"
-                                    >
-                                      <X className="w-2.5 h-2.5" />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      data-ocid={`gtt.depth_button.${i + 1}`}
-                                      onClick={() =>
-                                        toggleGttRowDepth(
-                                          gtt.gtt_order_id ||
-                                            gtt.id ||
-                                            String(i),
-                                          gtt.instrument_token || "",
-                                        )
-                                      }
-                                      title="Market Depth"
-                                      className={`w-5 h-5 flex items-center justify-center rounded transition-colors ${gttRowDepthOpen.has(gtt.gtt_order_id || gtt.id || String(i)) ? "bg-blue-900/40 text-blue-400" : "bg-secondary text-muted-foreground hover:text-foreground"}`}
-                                    >
-                                      <BarChart2 className="w-2.5 h-2.5" />
-                                    </button>
-                                  </div>
-                                </td>
-                              </tr>
-                              {gttRowDepthOpen.has(
-                                gtt.gtt_order_id || gtt.id || String(i),
-                              ) && (
-                                <tr
-                                  data-ocid={`gtt.depth.panel.${i + 1}`}
-                                  className="border-b border-border/30 bg-secondary/20"
-                                >
-                                  <td colSpan={8} className="px-3 py-2">
-                                    <div className="flex items-center justify-between mb-1.5">
-                                      <p className="text-[9px] font-bold text-muted-foreground uppercase tracking-widest">
-                                        Market Depth —{" "}
-                                        {(gtt.instrument_token || "—")
-                                          .split("|")
-                                          .pop()}
-                                      </p>
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          fetchGttRowDepth(
-                                            gtt.gtt_order_id ||
-                                              gtt.id ||
-                                              String(i),
-                                            gtt.instrument_token || "",
-                                          )
-                                        }
-                                        className="text-[9px] text-muted-foreground hover:text-foreground flex items-center gap-1"
-                                        title="Refresh depth"
-                                      >
-                                        <RefreshCw className="w-2.5 h-2.5" />{" "}
-                                        Refresh
-                                      </button>
-                                    </div>
-                                    {gttRowDepthData[
-                                      gtt.gtt_order_id || gtt.id || String(i)
-                                    ] ? (
-                                      <DepthRows
-                                        depth={
-                                          gttRowDepthData[
-                                            gtt.gtt_order_id ||
-                                              gtt.id ||
-                                              String(i)
-                                          ]!
-                                        }
-                                      />
-                                    ) : (
-                                      <p className="text-[10px] text-muted-foreground text-center py-2">
-                                        Loading depth…
-                                      </p>
-                                    )}
-                                  </td>
-                                </tr>
-                              )}
-                            </React.Fragment>
-                          );
-                        })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </>
-        )}
-      </div>
-      <AlertDialog
-        open={!!cancelConfirm}
-        onOpenChange={(open) => {
-          if (!open) setCancelConfirm(null);
-        }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Cancel Order?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Are you sure you want to cancel order{" "}
-              <span className="font-semibold text-foreground">
-                {cancelConfirm?.orderId}
-              </span>
-              ? This action cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel
-              data-ocid="cancel_order.cancel_button"
-              onClick={() => setCancelConfirm(null)}
-            >
-              No, Keep
-            </AlertDialogCancel>
-            <AlertDialogAction
-              data-ocid="cancel_order.confirm_button"
-              className="bg-red-600 hover:bg-red-500 text-white"
-              onClick={() => {
-                if (!cancelConfirm) return;
-                if (cancelConfirm.type === "regular") {
-                  cancelRegularOrder(cancelConfirm.orderId);
-                } else {
-                  cancelGTTOrder(cancelConfirm.orderId);
-                }
-                setCancelConfirm(null);
-              }}
-            >
-              Yes, Cancel
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </>
-  );
-}
-
 // ─── Positions Tab ─────────────────────────────────────────────────────────────
 function PositionsTab({
   token,
-  onSquareOff,
 }: {
   token: string;
-  onSquareOff?: (pos: Position, mode: "sell" | "gtt") => void;
 }) {
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(false);
@@ -3836,30 +1409,6 @@ function PositionsTab({
                             />
                           </div>
                         </div>
-                        {pos.quantity !== 0 && (
-                          <div
-                            className="flex gap-2 mt-3"
-                            onClick={(ev) => ev.stopPropagation()}
-                            onKeyDown={(ev) => ev.stopPropagation()}
-                          >
-                            <button
-                              type="button"
-                              data-ocid={`positions.squareoff.${i + 1}`}
-                              onClick={() => onSquareOff?.(pos, "sell")}
-                              className="flex-1 h-8 rounded text-[11px] font-bold bg-red-600 hover:bg-red-500 text-white transition-colors"
-                            >
-                              Square Off (SELL)
-                            </button>
-                            <button
-                              type="button"
-                              data-ocid={`positions.gtt_squareoff.${i + 1}`}
-                              onClick={() => onSquareOff?.(pos, "gtt")}
-                              className="flex-1 h-8 rounded text-[11px] font-bold bg-amber-600 hover:bg-amber-500 text-white transition-colors"
-                            >
-                              GTT Square Off
-                            </button>
-                          </div>
-                        )}
                       </td>
                     </tr>
                   )}
@@ -3876,10 +1425,8 @@ function PositionsTab({
 // ─── Holdings Tab ──────────────────────────────────────────────────────────────
 function HoldingsTab({
   token,
-  onSquareOff,
 }: {
   token: string;
-  onSquareOff?: (h: Holding, mode: "sell" | "gtt") => void;
 }) {
   const [holdings, setHoldings] = useState<Holding[]>([]);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
@@ -4070,34 +1617,6 @@ function HoldingsTab({
                       <PnlPct value={pnlPct} />
                     </td>
                   </tr>
-                  {isExpanded && (
-                    <tr className="border-b border-border/50 bg-secondary/20">
-                      <td colSpan={7} className="py-2 px-4">
-                        <div
-                          className="flex gap-2"
-                          onClick={(ev) => ev.stopPropagation()}
-                          onKeyDown={(ev) => ev.stopPropagation()}
-                        >
-                          <button
-                            type="button"
-                            data-ocid={`holdings.squareoff.${i + 1}`}
-                            onClick={() => onSquareOff?.(h, "sell")}
-                            className="flex-1 h-8 rounded text-[11px] font-bold bg-red-600 hover:bg-red-500 text-white transition-colors"
-                          >
-                            Square Off (SELL)
-                          </button>
-                          <button
-                            type="button"
-                            data-ocid={`holdings.gtt_squareoff.${i + 1}`}
-                            onClick={() => onSquareOff?.(h, "gtt")}
-                            className="flex-1 h-8 rounded text-[11px] font-bold bg-amber-600 hover:bg-amber-500 text-white transition-colors"
-                          >
-                            GTT Square Off
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
                 </tbody>
               );
             })}
@@ -5261,10 +2780,7 @@ interface LtpSidePanelProps {
   side: "CE" | "PE";
   strikePrice: number;
   token: string;
-  lotSize: number;
   onClose: () => void;
-  onBuy: (instrumentKey: string, ltp: number, lotSize: number) => void;
-  onSell: (instrumentKey: string, ltp: number, lotSize: number) => void;
 }
 
 // ─── LTP Side Panel Sub-components (memoized to avoid full re-render every second) ─
@@ -5432,10 +2948,7 @@ function LtpSidePanel({
   side,
   strikePrice,
   token,
-  lotSize,
   onClose,
-  onBuy,
-  onSell,
 }: LtpSidePanelProps) {
   const [depth, setDepth] = useState<{
     bids: MarketDepthEntry[];
@@ -5687,34 +3200,6 @@ function LtpSidePanel({
               isPositive={isPositive}
             />
           </div>
-        </div>
-
-        {/* Buy / Sell buttons */}
-        <div className="flex gap-2 p-3 border-b border-border shrink-0">
-          <button
-            data-ocid="ltp_panel.buy_button"
-            type="button"
-            onClick={() => {
-              onBuy(instrumentKey, liveLtp, lotSize);
-              onClose();
-            }}
-            className="flex-1 py-2.5 rounded font-bold text-sm text-white transition-opacity hover:opacity-90"
-            style={{ background: "oklch(0.55 0.18 145)" }}
-          >
-            BUY
-          </button>
-          <button
-            data-ocid="ltp_panel.sell_button"
-            type="button"
-            onClick={() => {
-              onSell(instrumentKey, liveLtp, lotSize);
-              onClose();
-            }}
-            className="flex-1 py-2.5 rounded font-bold text-sm text-white transition-opacity hover:opacity-90"
-            style={{ background: "oklch(0.55 0.22 22)" }}
-          >
-            SELL
-          </button>
         </div>
 
         {/* Scrollable content */}
@@ -6212,19 +3697,12 @@ function OptionChainTab({
   indexTicks,
   initialUnderlying,
   tradeSettings,
-  onBuyStrike,
   onUnderlyingChange,
 }: {
   token: string;
   indexTicks: Record<string, TickData>;
   initialUnderlying?: string;
   tradeSettings?: TradeSettings;
-  onBuyStrike?: (
-    instrumentKey: string,
-    ltp: number,
-    txType: "BUY" | "SELL",
-    lotSize: number,
-  ) => void;
   onUnderlyingChange?: (underlying: string) => void;
 }) {
   const [underlying, setUnderlying] = useState<string>(
@@ -6483,7 +3961,6 @@ function OptionChainTab({
   }, []);
 
   // Calculate Greeks locally using Black-Scholes every second
-  // biome-ignore lint/correctness/useExhaustiveDependencies: interval recalculates on data change
   useEffect(() => {
     if (!expiry || displayChain.length === 0 || underlyingLtp <= 0) return;
 
@@ -6863,15 +4340,6 @@ function OptionChainTab({
           strikePrice={sidePanel.strikePrice}
           token={token}
           onClose={() => setSidePanel(null)}
-          lotSize={sidePanel.lotSize}
-          onBuy={(ik, ltpVal, ls) => {
-            onBuyStrike?.(ik, ltpVal, "BUY", ls);
-            setSidePanel(null);
-          }}
-          onSell={(ik, ltpVal, ls) => {
-            onBuyStrike?.(ik, ltpVal, "SELL", ls);
-            setSidePanel(null);
-          }}
         />
       )}
     </div>
@@ -7302,14 +4770,6 @@ function OverviewTab({
         <div className="grid grid-cols-2 gap-2">
           <button
             type="button"
-            data-ocid="overview.orders_button"
-            onClick={() => onTabChange("orders")}
-            className="py-2.5 px-4 rounded border border-border text-xs font-semibold text-foreground hover:bg-secondary transition-colors"
-          >
-            View Orders
-          </button>
-          <button
-            type="button"
             data-ocid="overview.options_button"
             onClick={() => onTabChange("options")}
             className="py-2.5 px-4 rounded border border-primary/50 text-xs font-semibold text-primary hover:bg-primary/10 transition-colors"
@@ -7531,42 +4991,8 @@ function DashboardScreen({
   } | null>(null);
   const [optionUnderlying, setOptionUnderlying] =
     useState<string>("NSE_INDEX|Nifty 50");
-  const [orderPrefill, setOrderPrefill] = useState<{
-    instrumentKey?: string;
-    txType?: "BUY" | "SELL";
-    price?: string;
-    quantity?: string;
-    lotSize?: number;
-  } | null>(null);
-
-  const [pendingSquareOff, setPendingSquareOff] = useState<{
-    instrumentKey: string;
-    name: string;
-    qty: number;
-    price: string;
-    lotSize: number;
-    mode: "sell" | "gtt";
-  } | null>(null);
-
-  const handleBuyStrike = (
-    instrumentKey: string,
-    ltp: number,
-    txType: "BUY" | "SELL",
-    lotSize: number,
-  ) => {
-    setOrderPrefill({
-      instrumentKey,
-      txType,
-      price: ltp.toFixed(2),
-      quantity: "1",
-      lotSize,
-    });
-    setActiveTab("orders");
-  };
-
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [tradeSettings, setTradeSettings] =
-    useState<TradeSettings>(loadTradeSettings);
+  const [tradeSettings] = useState<TradeSettings>(loadTradeSettings);
 
   const handleIndexContextMenu = (
     key: string,
@@ -7633,8 +5059,6 @@ function DashboardScreen({
       <SettingsModal
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        tradeSettings={tradeSettings}
-        onTradeSettingsSave={setTradeSettings}
       />
 
       {/* CORS warning */}
@@ -7696,136 +5120,21 @@ function DashboardScreen({
             {activeTab === "funds" && (
               <FundsTab funds={funds} loading={loading} />
             )}
-            {activeTab === "orders" && (
-              <OrdersTab
-                token={token}
-                prefill={orderPrefill}
-                onPrefillConsumed={() => setOrderPrefill(null)}
-                onBack={() => {
-                  setOrderPrefill(null);
-                  setActiveTab("options");
-                }}
-              />
-            )}
-            {activeTab === "positions" && (
-              <PositionsTab
-                token={token}
-                onSquareOff={(pos, mode) => {
-                  const instrumentKey = pos.instrument_token;
-                  const qty = Math.abs(pos.quantity);
-                  setPendingSquareOff({
-                    instrumentKey,
-                    name: pos.tradingsymbol || instrumentKey,
-                    qty,
-                    price: pos.last_price.toFixed(2),
-                    lotSize: qty,
-                    mode,
-                  });
-                }}
-              />
-            )}
-            {activeTab === "holdings" && (
-              <HoldingsTab
-                token={token}
-                onSquareOff={(h, mode) => {
-                  const instrumentKey =
-                    h.instrument_token || `${h.exchange}_EQ|${h.tradingsymbol}`;
-                  const qty = h.quantity;
-                  setPendingSquareOff({
-                    instrumentKey,
-                    name: h.tradingsymbol || instrumentKey,
-                    qty,
-                    price: h.last_price.toFixed(2),
-                    lotSize: qty,
-                    mode,
-                  });
-                }}
-              />
-            )}
+
+            {activeTab === "positions" && <PositionsTab token={token} />}
+            {activeTab === "holdings" && <HoldingsTab token={token} />}
             {activeTab === "options" && (
               <OptionChainTab
                 token={token}
                 indexTicks={indexTicks}
                 initialUnderlying={optionUnderlying}
                 tradeSettings={tradeSettings}
-                onBuyStrike={handleBuyStrike}
                 onUnderlyingChange={setOptionUnderlying}
               />
             )}
             {activeTab === "market" && <LiveTab token={token} />}
             {activeTab === "risk" && <RiskTab token={token} />}
           </div>
-
-          {/* Square-Off Confirmation Dialog */}
-          <AlertDialog
-            open={!!pendingSquareOff}
-            onOpenChange={(open) => {
-              if (!open) setPendingSquareOff(null);
-            }}
-          >
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Confirm Square Off</AlertDialogTitle>
-                <AlertDialogDescription>
-                  {pendingSquareOff && (
-                    <>
-                      Are you sure you want to square off{" "}
-                      <span className="font-semibold text-foreground">
-                        {pendingSquareOff.name}
-                      </span>{" "}
-                      —{" "}
-                      <span className="font-semibold text-foreground">
-                        {pendingSquareOff.qty} qty
-                      </span>{" "}
-                      {pendingSquareOff.mode === "sell"
-                        ? "at market price (SELL order)"
-                        : "via GTT SELL order"}
-                      ?
-                    </>
-                  )}
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel
-                  data-ocid="squareoff.cancel_button"
-                  onClick={() => setPendingSquareOff(null)}
-                >
-                  Cancel
-                </AlertDialogCancel>
-                <AlertDialogAction
-                  data-ocid="squareoff.confirm_button"
-                  className="bg-red-600 hover:bg-red-500 text-white"
-                  onClick={() => {
-                    if (!pendingSquareOff) return;
-                    const { instrumentKey, price, qty, lotSize, mode } =
-                      pendingSquareOff;
-                    if (mode === "sell") {
-                      setOrderPrefill({
-                        instrumentKey,
-                        txType: "SELL",
-                        price,
-                        quantity: String(qty),
-                      });
-                    } else {
-                      setOrderPrefill({
-                        instrumentKey,
-                        txType: "SELL",
-                        price,
-                        quantity: String(qty),
-                        lotSize,
-                        // @ts-ignore
-                        gttMode: true,
-                      });
-                    }
-                    setActiveTab("orders");
-                    setPendingSquareOff(null);
-                  }}
-                >
-                  Confirm Square Off
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
 
           {/* Footer */}
           <footer
@@ -7908,35 +5217,16 @@ function DashboardScreen({
 // ─── Setup Screen ─────────────────────────────────────────────────────────────
 function SetupScreen({ onToken }: { onToken: (token: string) => void }) {
   useTheme(); // apply theme class on mount
-  const [apiKey, setApiKey] = useState(LS.get(KEYS.apiKey));
-  const [apiSecret, setApiSecret] = useState(LS.get(KEYS.apiSecret));
-  const [redirectUri, setRedirectUri] = useState(
-    LS.get(KEYS.redirectUri) || window.location.href.split("?")[0],
-  );
-  const [manualToken, setManualToken] = useState("");
-  const [showSecret, setShowSecret] = useState(false);
-  const [showManual, setShowManual] = useState(false);
+  const [analyticsToken, setAnalyticsToken] = useState("");
 
   const handleConnect = () => {
-    if (!apiKey.trim()) {
-      toast.error("API Key is required");
+    if (!analyticsToken.trim()) {
+      toast.error("Analytics Token is required");
       return;
     }
-    LS.set(KEYS.apiKey, apiKey.trim());
-    LS.set(KEYS.apiSecret, apiSecret.trim());
-    LS.set(KEYS.redirectUri, redirectUri.trim());
-    const url = `https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id=${encodeURIComponent(apiKey.trim())}&redirect_uri=${encodeURIComponent(redirectUri.trim())}`;
-    window.location.href = url;
-  };
-
-  const handleSaveToken = () => {
-    if (!manualToken.trim()) {
-      toast.error("Token is required");
-      return;
-    }
-    LS.set(KEYS.token, manualToken.trim());
-    toast.success("Token saved!");
-    onToken(manualToken.trim());
+    LS.set(KEYS.token, analyticsToken.trim());
+    toast.success("Connected!");
+    onToken(analyticsToken.trim());
   };
 
   return (
@@ -7959,12 +5249,17 @@ function SetupScreen({ onToken }: { onToken: (token: string) => void }) {
           <h1 className="font-display font-bold text-xl text-foreground tracking-tight">
             Upstox Connect
           </h1>
-          <p className="text-xs text-muted-foreground mt-1">
-            Professional trading terminal
+          <div className="flex items-center justify-center gap-2 mt-1">
+            <span className="text-[10px] bg-blue-600 text-white px-2 py-0.5 rounded font-bold tracking-wider">
+              ANALYTICS MODE
+            </span>
+          </div>
+          <p className="text-xs text-muted-foreground mt-2">
+            Enter your Analytics Access Token (read-only, valid 1 year)
           </p>
         </div>
 
-        {/* OAuth Setup */}
+        {/* Analytics Token Input */}
         <div
           className="rounded border border-border overflow-hidden"
           style={{ background: "oklch(var(--card))" }}
@@ -7974,215 +5269,37 @@ function SetupScreen({ onToken }: { onToken: (token: string) => void }) {
             style={{ background: "oklch(var(--card))" }}
           >
             <p className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
-              OAuth Setup
+              Analytics Access Token
             </p>
           </div>
           <div className="p-4 space-y-3">
             <div>
               <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                API Key
+                Access Token
               </Label>
               <Input
-                data-ocid="setup.api_key_input"
-                placeholder="Your Upstox API Key"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                className="h-10 mt-1 bg-secondary border-border font-mono text-xs"
-              />
-            </div>
-            <div>
-              <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                API Secret
-              </Label>
-              <div className="relative mt-1">
-                <Input
-                  data-ocid="setup.api_secret_input"
-                  type={showSecret ? "text" : "password"}
-                  placeholder="Your API Secret"
-                  value={apiSecret}
-                  onChange={(e) => setApiSecret(e.target.value)}
-                  className="h-10 bg-secondary border-border font-mono text-xs pr-10"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowSecret(!showSecret)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                >
-                  {showSecret ? (
-                    <EyeOff className="w-3.5 h-3.5" />
-                  ) : (
-                    <Eye className="w-3.5 h-3.5" />
-                  )}
-                </button>
-              </div>
-            </div>
-            <div>
-              <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                Redirect URI
-              </Label>
-              <Input
-                data-ocid="setup.redirect_input"
-                placeholder="https://yourapp.com/callback"
-                value={redirectUri}
-                onChange={(e) => setRedirectUri(e.target.value)}
+                data-ocid="setup.analytics_token.input"
+                placeholder="Paste your Analytics Access Token here"
+                value={analyticsToken}
+                onChange={(e) => setAnalyticsToken(e.target.value)}
                 className="h-10 mt-1 bg-secondary border-border font-mono text-[11px]"
+                type="password"
               />
+              <p className="text-[10px] text-muted-foreground mt-1.5">
+                ⚠️ Do not share this token. Ensure it is stored securely.
+              </p>
             </div>
             <button
-              data-ocid="setup.submit_button"
+              data-ocid="setup.connect.button"
               type="button"
               onClick={handleConnect}
               className="w-full h-10 rounded text-sm font-bold text-white transition-colors"
               style={{ background: "oklch(0.62 0.2 250)" }}
             >
-              Connect to Upstox
+              Connect
             </button>
           </div>
         </div>
-
-        {/* Manual Token */}
-        <div
-          className="rounded border border-border overflow-hidden"
-          style={{ background: "oklch(var(--card))" }}
-        >
-          <button
-            type="button"
-            onClick={() => setShowManual(!showManual)}
-            className="w-full px-4 py-2.5 flex items-center justify-between text-[10px] font-bold text-foreground/80 tracking-widest uppercase border-b border-border hover:text-foreground transition-colors"
-            style={{ background: "oklch(var(--card))" }}
-          >
-            Manual Token Entry
-            <ChevronDown
-              className={`w-3 h-3 transition-transform ${showManual ? "rotate-180" : ""}`}
-            />
-          </button>
-          {showManual && (
-            <div className="p-4 space-y-3">
-              <div>
-                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                  Access Token
-                </Label>
-                <Input
-                  data-ocid="auth.manual_token_input"
-                  placeholder="Paste your access token here"
-                  value={manualToken}
-                  onChange={(e) => setManualToken(e.target.value)}
-                  className="h-10 mt-1 bg-secondary border-border font-mono text-[11px]"
-                />
-              </div>
-              <button
-                data-ocid="auth.manual_token_button"
-                type="button"
-                onClick={handleSaveToken}
-                className="w-full h-10 rounded text-xs font-bold border border-border text-foreground bg-secondary hover:bg-secondary/80 transition-colors"
-              >
-                Save Token
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Token Exchange Screen ────────────────────────────────────────────────────
-function ExchangeScreen({ onToken }: { onToken: (token: string) => void }) {
-  const [status, setStatus] = useState<"exchanging" | "error">("exchanging");
-  const [error, setError] = useState("");
-  const doneRef = useRef(false);
-
-  useEffect(() => {
-    if (doneRef.current) return;
-    doneRef.current = true;
-
-    const params = new URLSearchParams(window.location.search);
-    const code = params.get("code");
-    if (!code) {
-      setStatus("error");
-      setError("No code in URL");
-      return;
-    }
-
-    const apiKey = LS.get(KEYS.apiKey);
-    const apiSecret = LS.get(KEYS.apiSecret);
-    const redirectUri = LS.get(KEYS.redirectUri);
-
-    if (!apiKey) {
-      setStatus("error");
-      setError("API Key not found");
-      return;
-    }
-
-    fetch("https://api.upstox.com/v2/login/authorization/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        code,
-        client_id: apiKey,
-        client_secret: apiSecret,
-        redirect_uri: redirectUri,
-        grant_type: "authorization_code",
-      }),
-    })
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.access_token) {
-          LS.set(KEYS.token, d.access_token);
-          window.history.replaceState({}, "", window.location.pathname);
-          onToken(d.access_token);
-        } else {
-          throw new Error(d.errors?.[0]?.message ?? JSON.stringify(d));
-        }
-      })
-      .catch((e) => {
-        setStatus("error");
-        setError(e.message);
-      });
-  }, [onToken]);
-
-  return (
-    <div
-      className="min-h-screen flex items-center justify-center"
-      style={{ background: "oklch(var(--background))" }}
-    >
-      <div className="text-center space-y-3">
-        {status === "exchanging" ? (
-          <>
-            <Loader2
-              className="w-8 h-8 animate-spin mx-auto"
-              style={{ color: "oklch(0.62 0.2 250)" }}
-            />
-            <p className="text-sm text-foreground font-semibold">
-              Authenticating…
-            </p>
-            <p className="text-xs text-muted-foreground">
-              Exchanging code for access token
-            </p>
-          </>
-        ) : (
-          <>
-            <div className="w-10 h-10 rounded-full bg-red-950 border border-red-800/40 flex items-center justify-center mx-auto">
-              <X className="w-5 h-5 text-loss" />
-            </div>
-            <p className="text-sm text-foreground font-semibold">
-              Authentication Failed
-            </p>
-            <p className="text-xs text-muted-foreground font-mono max-w-xs">
-              {error}
-            </p>
-            <button
-              type="button"
-              onClick={() => {
-                window.history.replaceState({}, "", window.location.pathname);
-                window.location.reload();
-              }}
-              className="mt-2 h-9 px-4 rounded border border-border text-xs font-bold text-foreground bg-secondary hover:bg-secondary/80 transition-colors"
-            >
-              Try Again
-            </button>
-          </>
-        )}
       </div>
     </div>
   );
@@ -8192,8 +5309,6 @@ function ExchangeScreen({ onToken }: { onToken: (token: string) => void }) {
 export default function App() {
   const [token, setToken] = useState(() => LS.get(KEYS.token));
   const [screen, setScreen] = useState<Screen>(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.has("code")) return "exchanging";
     if (LS.get(KEYS.token)) return "dashboard";
     return "setup";
   });
@@ -8223,7 +5338,6 @@ export default function App() {
         }}
       />
       {screen === "setup" && <SetupScreen onToken={handleToken} />}
-      {screen === "exchanging" && <ExchangeScreen onToken={handleToken} />}
       {screen === "dashboard" && token && (
         <DashboardScreen token={token} onDisconnect={handleDisconnect} />
       )}

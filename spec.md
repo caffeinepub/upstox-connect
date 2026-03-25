@@ -1,49 +1,33 @@
-# Upstox Connect
+# Upstox Connect — Analytics Mode Only
 
 ## Current State
-- `TrendAnalysisPanel` in App.tsx generates BUY CALL / BUY PUT / NEUTRAL signals using 8 signals (PCR, Max Pain, OI buildup, CE/PE resistance, delta momentum, IV skew)
-- Signals fire on every 1-second re-render based on live data
-- No signal history or persistence – signal changes/disappears as data fluctuates
-- No performance tracking
+The app supports full trading: OAuth login with API Key + Secret, order placement (Regular and GTT), square-off from Positions/Holdings, and a Settings modal with Trade Settings tab. The Setup screen has an OAuth flow and a manual token entry section.
 
 ## Requested Changes (Diff)
 
 ### Add
-1. **High-conviction signal gating**: Only emit BUY CALL or BUY PUT when ALL of these are true simultaneously:
-   - 6+ out of 8 signals agree
-   - ATM delta confirms direction (>0.52 for CALL, <0.48 for PUT)
-   - IV is not extreme (>40% = skip, too risky)
-   - PCR confirms direction
-   - Max Pain confirms direction
-   Signal must persist for 3 consecutive recalculations before being recorded (debounce). Max 3 signals per calendar day.
-
-2. **Signal Monitor panel** (separate collapsible section below TrendAnalysisPanel):
-   - Header: "Signal Monitor" with a green dot when active, signal count badge
-   - Each signal card shows: Instrument (NIFTY/BANKNIFTY/etc), Strike, Action (BUY CALL/BUY PUT), Expiry, Entry Price, SL, TGT1, TGT2, Timestamp, Status badge
-   - Status values: ACTIVE (yellow), TARGET1 HIT (green), TARGET2 HIT (emerald), SL HIT (red), EXPIRED (grey)
-   - Auto-update status: compare current LTP of the signal's strike against SL, TGT1, TGT2 every second
-   - Performance summary row: Total | Win% | Active | SL Hit
-   - Signals stored in localStorage key `upstox_signals_v1` as JSON array
-   - Max 30 signals stored (oldest dropped)
-   - Clear All button
-
-3. **Signal debounce logic**: Use a `useRef` counter inside `OptionChainTab` (or wherever signals are generated). Only call `recordSignal()` after the same signal direction + strike has been stable for 3 consecutive ticks.
-
-4. **Daily limit**: Check localStorage signal count for today's date. If already 3 signals today, do not generate more.
-
-5. **Signal expiry**: Each signal gets an expiry date. If current time > expiry date of the signal, mark status as EXPIRED.
+- Analytics Token input as the sole login method on the Setup screen (replaces OAuth + manual token)
+- A visible "Analytics Mode" badge/indicator in the header to make clear trading is disabled
 
 ### Modify
-- `TrendAnalysisPanel`: Add a callback prop `onSignalGenerated?: (signal: GeneratedSignal) => void` called when a HIGH-confidence non-NEUTRAL signal is ready to be recorded
-- `OptionChainTab`: Wire up debounce logic and `onSignalGenerated` handler that saves to localStorage and updates state
+- **Setup screen**: Replace OAuth flow (API Key, Secret, Redirect URI) with a single "Analytics Access Token" input field. Keep the same save-to-localStorage logic using `KEYS.token`.
+- **DashboardScreen tabs**: Hide the `orders` tab entirely (read-only analytics token cannot place orders)
+- **Options tab**: Remove all Buy/Sell buttons and order form triggers. Keep option chain data display, AI analysis, and signal monitor.
+- **Positions tab**: Remove "Square Off" and "GTT Square Off" buttons from expanded rows.
+- **Holdings tab**: Remove "Square Off (SELL)" and "GTT Square Off" buttons from expanded rows.
+- **Settings modal**: Remove the "Trade Settings" tab (SL%, Trailing SL Gap, TGT1/TGT2). Keep only the "Accounts" tab for managing saved analytics tokens.
+- **Header**: Show a read-only "Analytics Mode" label/badge near the top.
 
 ### Remove
-- Nothing removed
+- ExchangeScreen (OAuth code exchange) — no OAuth needed for Analytics Token
+- OAuth-related state and handlers (`handleConnect`, `handleExchange`, etc.)
+- All order placement UI and logic
 
 ## Implementation Plan
-1. Define `GeneratedSignal` TypeScript interface
-2. Add `onSignalGenerated` prop to `TrendAnalysisPanel`
-3. Inside `TrendAnalysisPanel`, add high-conviction gate logic and call the callback when conditions met
-4. In `OptionChainTab`, add `signals` state (loaded from localStorage), debounce ref, `recordSignal` function, `SignalMonitorPanel` component
-5. Build `SignalMonitorPanel` component showing signal cards with live status updates
-6. Wire up LTP-based status auto-update using current option chain data
+1. Modify SetupScreen to show only an Analytics Token input and save button
+2. Remove ExchangeScreen rendering from App root (no OAuth code exchange needed)
+3. Hide Orders tab from TabNav and tab content
+4. Remove Buy/Sell buttons and order form triggers from Options tab
+5. Remove Square Off buttons from Positions and Holdings expanded rows
+6. Remove Trade Settings tab from SettingsModal
+7. Add "Analytics Mode" badge in DashboardScreen header
