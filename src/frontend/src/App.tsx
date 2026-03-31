@@ -63,6 +63,8 @@ import {
 import type React from "react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { ExternalBlob, createActor } from "./backend";
+import { loadConfig } from "./config";
 
 // ─── Black-Scholes Functions ──────────────────────────────────────────────────
 function normCDF(x: number): number {
@@ -3375,7 +3377,7 @@ const OptionChainHeader = memo(function OptionChainHeader() {
     <thead className="sticky top-0 z-10">
       <tr style={{ background: "oklch(var(--card))" }}>
         <th
-          colSpan={8}
+          colSpan={9}
           className="py-1.5 px-2 text-center text-[10px] font-bold tracking-wider border-b border-r border-border"
           style={{
             color: "oklch(0.64 0.2 145)",
@@ -3388,7 +3390,7 @@ const OptionChainHeader = memo(function OptionChainHeader() {
           STRIKE
         </th>
         <th
-          colSpan={8}
+          colSpan={9}
           className="py-1.5 px-2 text-center text-[10px] font-bold tracking-wider border-b border-l border-border"
           style={{
             color: "oklch(0.62 0.22 22)",
@@ -3399,23 +3401,27 @@ const OptionChainHeader = memo(function OptionChainHeader() {
         </th>
       </tr>
       <tr style={{ background: "oklch(var(--card))" }}>
-        {["LTP", "OI", "VOL", "IV%", "Δ", "Γ", "Θ", "Vega"].map((h) => (
-          <th
-            key={h}
-            className="py-1 px-2 text-right text-[10px] text-muted-foreground font-semibold border-b border-border"
-          >
-            {h}
-          </th>
-        ))}
+        {["VOL", "IV", "Vega", "Γ", "Θ", "Δ", "OI(chg)", "OI(L)", "LTP"].map(
+          (h) => (
+            <th
+              key={h}
+              className="py-1 px-2 text-right text-[10px] text-muted-foreground font-semibold border-b border-border"
+            >
+              {h}
+            </th>
+          ),
+        )}
         <th className="py-1 px-2 border-b border-border" />
-        {["LTP", "OI", "VOL", "IV", "Vega", "Θ", "Γ", "Δ"].map((h) => (
-          <th
-            key={h}
-            className="py-1 px-2 text-left text-[10px] text-muted-foreground font-semibold border-b border-border"
-          >
-            {h}
-          </th>
-        ))}
+        {["LTP", "OI(L)", "OI(chg)", "Δ", "Θ", "Γ", "Vega", "IV", "VOL"].map(
+          (h) => (
+            <th
+              key={h}
+              className="py-1 px-2 text-left text-[10px] text-muted-foreground font-semibold border-b border-border"
+            >
+              {h}
+            </th>
+          ),
+        )}
       </tr>
     </thead>
   );
@@ -3939,6 +3945,18 @@ function OptionChainTab({
       }
     >
   >({});
+  const [oiChangeData, setOiChangeData] = useState<Record<string, number>>({});
+  const prevOIRef = useRef<Record<string, number>>({});
+  const backendActorRef = useRef<any>(null);
+  useEffect(() => {
+    loadConfig().then((cfg) => {
+      backendActorRef.current = createActor(
+        cfg.backend_canister_id,
+        async () => new Uint8Array(),
+        async () => ExternalBlob.fromBytes(new Uint8Array()),
+      );
+    });
+  }, []);
   const [sidePanel, setSidePanel] = useState<{
     instrumentKey: string;
     ltp: number;
@@ -3960,7 +3978,7 @@ function OptionChainTab({
     if (node) node.scrollIntoView({ block: "center", behavior: "smooth" });
   }, []);
 
-  // Calculate Greeks locally using Black-Scholes every second
+  // Calculate Greeks locally using Black-Scholes every second (fallback when backend data unavailable)
   useEffect(() => {
     if (!expiry || displayChain.length === 0 || underlyingLtp <= 0) return;
 
@@ -4020,6 +4038,101 @@ function OptionChainTab({
     const id = setInterval(calcAllGreeks, 1000);
     return () => clearInterval(id);
   }, [expiry, displayChain, underlyingLtp]);
+
+  // Fetch Greeks from backend proxy every 5 seconds for accurate Upstox values
+  useEffect(() => {
+    if (!token || displayChain.length === 0) return;
+    const fetchGreeks = async () => {
+      if (!backendActorRef.current) return;
+      try {
+        const keys = displayChain
+          .flatMap((row) => [
+            row.call_options?.instrument_key,
+            row.put_options?.instrument_key,
+          ])
+          .filter(Boolean)
+          .join(",");
+        const raw = await backendActorRef.current.getOptionGreeks(keys, token);
+        const parsed = JSON.parse(raw);
+        if (parsed?.data) {
+          const newGreeks: Record<
+            string,
+            {
+              delta?: number;
+              gamma?: number;
+              theta?: number;
+              vega?: number;
+              iv?: number;
+            }
+          > = {};
+          for (const [key, val] of Object.entries<any>(parsed.data)) {
+            newGreeks[key] = {
+              delta: val.delta,
+              gamma: val.gamma,
+              theta: val.theta,
+              vega: val.vega,
+              iv: val.iv,
+            };
+          }
+          setGreeksData((prev) => {
+            const merged = { ...prev };
+            for (const [key, val] of Object.entries(newGreeks)) {
+              merged[key] = {
+                ...prev[key],
+                ...(val.delta != null && Number.isFinite(val.delta)
+                  ? { delta: val.delta }
+                  : {}),
+                ...(val.gamma != null && Number.isFinite(val.gamma)
+                  ? { gamma: val.gamma }
+                  : {}),
+                ...(val.theta != null && Number.isFinite(val.theta)
+                  ? { theta: val.theta }
+                  : {}),
+                ...(val.vega != null && Number.isFinite(val.vega)
+                  ? { vega: val.vega }
+                  : {}),
+                ...(val.iv != null && Number.isFinite(val.iv)
+                  ? { iv: val.iv }
+                  : {}),
+              };
+            }
+            return merged;
+          });
+        }
+      } catch (_e) {
+        // silently fail, keep existing data or fall back to Black-Scholes
+      }
+    };
+    fetchGreeks();
+    const id = setInterval(fetchGreeks, 1000);
+    return () => clearInterval(id);
+  }, [token, displayChain]);
+
+  // Track OI changes every second
+  useEffect(() => {
+    if (displayChain.length === 0) return;
+    const id = setInterval(() => {
+      setOiChangeData(() => {
+        const next: Record<string, number> = {};
+        for (const row of displayChain) {
+          const ceKey = row.call_options?.instrument_key;
+          const peKey = row.put_options?.instrument_key;
+          const ceOI = row.call_options?.market_data?.oi ?? 0;
+          const peOI = row.put_options?.market_data?.oi ?? 0;
+          if (ceKey) {
+            next[ceKey] = ceOI - (prevOIRef.current[ceKey] ?? ceOI);
+            prevOIRef.current[ceKey] = ceOI;
+          }
+          if (peKey) {
+            next[peKey] = peOI - (prevOIRef.current[peKey] ?? peOI);
+            prevOIRef.current[peKey] = peOI;
+          }
+        }
+        return next;
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, [displayChain]);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -4197,6 +4310,81 @@ function OptionChainTab({
                             : {}
                         }
                       >
+                        {/* CE: VOL | IV | Vega | Γ | Θ | Δ | OI(chg) | OI(L) | LTP */}
+                        <td
+                          className="py-1.5 px-2 text-right font-mono-data text-[9px]"
+                          style={{ color: "oklch(0.64 0.2 145 / 0.7)" }}
+                        >
+                          {ce.volume
+                            ? `${(ce.volume / 1000).toFixed(1)}K`
+                            : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-1 text-right font-mono-data text-[9px]"
+                          style={{ color: "oklch(0.64 0.2 145 / 0.6)" }}
+                        >
+                          {ceIk && greeksData[ceIk]?.iv != null
+                            ? (() => {
+                                const iv = greeksData[ceIk]!.iv!;
+                                return `${(iv < 2 ? iv * 100 : iv).toFixed(1)}%`;
+                              })()
+                            : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-1 text-right font-mono-data text-[9px]"
+                          style={{ color: "oklch(0.64 0.2 145 / 0.5)" }}
+                        >
+                          {ceIk && greeksData[ceIk]?.vega != null
+                            ? (greeksData[ceIk].vega as number).toFixed(4)
+                            : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-1 text-right font-mono-data text-[9px]"
+                          style={{ color: "oklch(0.64 0.2 145 / 0.5)" }}
+                        >
+                          {ceIk && greeksData[ceIk]?.gamma != null
+                            ? (greeksData[ceIk].gamma as number).toFixed(4)
+                            : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-1 text-right font-mono-data text-[9px]"
+                          style={{ color: "oklch(0.64 0.2 145 / 0.5)" }}
+                        >
+                          {ceIk && greeksData[ceIk]?.theta != null
+                            ? (greeksData[ceIk].theta as number).toFixed(4)
+                            : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-1 text-right font-mono-data text-[9px]"
+                          style={{ color: "oklch(0.64 0.2 145 / 0.5)" }}
+                        >
+                          {ceIk && greeksData[ceIk]?.delta != null
+                            ? (greeksData[ceIk].delta as number).toFixed(4)
+                            : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-1 text-right font-mono-data text-[9px]"
+                          style={{
+                            color:
+                              ceIk && oiChangeData[ceIk] > 0
+                                ? "oklch(0.64 0.2 145)"
+                                : ceIk && oiChangeData[ceIk] < 0
+                                  ? "oklch(0.62 0.22 22)"
+                                  : "oklch(0.64 0.2 145 / 0.4)",
+                          }}
+                        >
+                          {ceIk &&
+                          oiChangeData[ceIk] != null &&
+                          oiChangeData[ceIk] !== 0
+                            ? `${oiChangeData[ceIk] > 0 ? "+" : ""}${(oiChangeData[ceIk] / 1000).toFixed(1)}K`
+                            : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-2 text-right font-mono-data text-[9px]"
+                          style={{ color: "oklch(0.64 0.2 145 / 0.7)" }}
+                        >
+                          {ce.oi ? `${(ce.oi / 100000).toFixed(2)}L` : "—"}
+                        </td>
                         {/* biome-ignore lint/a11y/useKeyWithClickEvents: trading table cell */}
                         <td
                           className="py-1.5 px-2 text-right font-mono-data text-foreground cursor-pointer hover:text-primary transition-colors"
@@ -4215,41 +4403,6 @@ function OptionChainTab({
                           {(ce.ltp ?? 0) > 0 ? (ce.ltp ?? 0).toFixed(2) : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-2 text-right font-mono-data"
-                          style={{ color: "oklch(0.64 0.2 145 / 0.7)" }}
-                        >
-                          {ce.oi ? `${(ce.oi / 1000).toFixed(1)}K` : "—"}
-                        </td>
-                        <td
-                          className="py-1.5 px-2 text-right font-mono-data"
-                          style={{ color: "oklch(0.64 0.2 145 / 0.7)" }}
-                        >
-                          {ce.volume
-                            ? `${(ce.volume / 1000).toFixed(1)}K`
-                            : "—"}
-                        </td>
-                        <td
-                          className="py-1.5 px-2 text-right font-mono-data border-r border-border"
-                          style={{ color: "oklch(0.64 0.2 145 / 0.5)" }}
-                        >
-                          {ceIk && greeksData[ceIk]?.iv != null
-                            ? greeksData[ceIk]!.iv!.toFixed(1)
-                            : "—"}
-                        </td>
-                        {(["delta", "gamma", "theta", "vega"] as const).map(
-                          (k) => (
-                            <td
-                              key={`ce-${k}`}
-                              className="py-1.5 px-1 text-right font-mono-data text-[9px]"
-                              style={{ color: "oklch(0.64 0.2 145 / 0.5)" }}
-                            >
-                              {ceIk && greeksData[ceIk]?.[k] != null
-                                ? (greeksData[ceIk][k] as number).toFixed(4)
-                                : "—"}
-                            </td>
-                          ),
-                        )}
-                        <td
                           className={`py-1.5 px-3 text-center font-mono-data font-bold text-xs ${
                             isAtm ? "text-atm" : "text-foreground"
                           }`}
@@ -4259,6 +4412,7 @@ function OptionChainTab({
                           )}
                           {row.strike_price.toLocaleString("en-IN")}
                         </td>
+                        {/* PE: LTP | OI(L) | OI(chg) | Δ | Θ | Γ | Vega | IV | VOL */}
                         {/* biome-ignore lint/a11y/useKeyWithClickEvents: trading table cell */}
                         <td
                           className="py-1.5 px-2 text-left font-mono-data text-foreground border-l border-border cursor-pointer hover:text-primary transition-colors"
@@ -4277,40 +4431,79 @@ function OptionChainTab({
                           {(pe.ltp ?? 0) > 0 ? (pe.ltp ?? 0).toFixed(2) : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-2 text-left font-mono-data"
+                          className="py-1.5 px-2 text-left font-mono-data text-[9px]"
                           style={{ color: "oklch(0.62 0.22 22 / 0.7)" }}
                         >
-                          {pe.oi ? `${(pe.oi / 1000).toFixed(1)}K` : "—"}
+                          {pe.oi ? `${(pe.oi / 100000).toFixed(2)}L` : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-2 text-left font-mono-data"
+                          className="py-1.5 px-1 text-left font-mono-data text-[9px]"
+                          style={{
+                            color:
+                              peIk && oiChangeData[peIk] > 0
+                                ? "oklch(0.64 0.2 145)"
+                                : peIk && oiChangeData[peIk] < 0
+                                  ? "oklch(0.62 0.22 22)"
+                                  : "oklch(0.62 0.22 22 / 0.4)",
+                          }}
+                        >
+                          {peIk &&
+                          oiChangeData[peIk] != null &&
+                          oiChangeData[peIk] !== 0
+                            ? `${oiChangeData[peIk] > 0 ? "+" : ""}${(oiChangeData[peIk] / 1000).toFixed(1)}K`
+                            : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-1 text-left font-mono-data text-[9px]"
+                          style={{ color: "oklch(0.62 0.22 22 / 0.5)" }}
+                        >
+                          {peIk && greeksData[peIk]?.delta != null
+                            ? (greeksData[peIk].delta as number).toFixed(4)
+                            : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-1 text-left font-mono-data text-[9px]"
+                          style={{ color: "oklch(0.62 0.22 22 / 0.5)" }}
+                        >
+                          {peIk && greeksData[peIk]?.theta != null
+                            ? (greeksData[peIk].theta as number).toFixed(4)
+                            : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-1 text-left font-mono-data text-[9px]"
+                          style={{ color: "oklch(0.62 0.22 22 / 0.5)" }}
+                        >
+                          {peIk && greeksData[peIk]?.gamma != null
+                            ? (greeksData[peIk].gamma as number).toFixed(4)
+                            : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-1 text-left font-mono-data text-[9px]"
+                          style={{ color: "oklch(0.62 0.22 22 / 0.5)" }}
+                        >
+                          {peIk && greeksData[peIk]?.vega != null
+                            ? (greeksData[peIk].vega as number).toFixed(4)
+                            : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-1 text-left font-mono-data text-[9px]"
+                          style={{ color: "oklch(0.62 0.22 22 / 0.6)" }}
+                        >
+                          {peIk && greeksData[peIk]?.iv != null
+                            ? (() => {
+                                const iv = greeksData[peIk]!.iv!;
+                                return `${(iv < 2 ? iv * 100 : iv).toFixed(1)}%`;
+                              })()
+                            : "—"}
+                        </td>
+                        <td
+                          className="py-1.5 px-2 text-left font-mono-data text-[9px]"
                           style={{ color: "oklch(0.62 0.22 22 / 0.7)" }}
                         >
                           {pe.volume
                             ? `${(pe.volume / 1000).toFixed(1)}K`
                             : "—"}
                         </td>
-                        <td
-                          className="py-1.5 px-2 text-left font-mono-data"
-                          style={{ color: "oklch(0.62 0.22 22 / 0.5)" }}
-                        >
-                          {peIk && greeksData[peIk]?.iv != null
-                            ? greeksData[peIk]!.iv!.toFixed(1)
-                            : "—"}
-                        </td>
-                        {(["vega", "theta", "gamma", "delta"] as const).map(
-                          (k) => (
-                            <td
-                              key={`pe-${k}`}
-                              className="py-1.5 px-1 text-left font-mono-data text-[9px]"
-                              style={{ color: "oklch(0.62 0.22 22 / 0.5)" }}
-                            >
-                              {peIk && greeksData[peIk]?.[k] != null
-                                ? (greeksData[peIk][k] as number).toFixed(4)
-                                : "—"}
-                            </td>
-                          ),
-                        )}
                       </tr>
                     );
                   })}
