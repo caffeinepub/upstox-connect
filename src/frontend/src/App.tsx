@@ -2782,6 +2782,8 @@ interface LtpSidePanelProps {
   side: "CE" | "PE";
   strikePrice: number;
   token: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  backendActor?: any;
   onClose: () => void;
 }
 
@@ -2950,6 +2952,7 @@ function LtpSidePanel({
   side,
   strikePrice,
   token,
+  backendActor,
   onClose,
 }: LtpSidePanelProps) {
   const [depth, setDepth] = useState<{
@@ -2995,6 +2998,7 @@ function LtpSidePanel({
   }, []);
 
   // Live LTP + depth polling every 1 second
+  // biome-ignore lint/correctness/useExhaustiveDependencies: backendActor is a ref, intentional
   useEffect(() => {
     if (!token || !instrumentKey) return;
     const encoded = encodeURIComponent(instrumentKey);
@@ -3067,19 +3071,16 @@ function LtpSidePanel({
           asks: { price: number; quantity: number; orders?: number }[];
         } | null = null;
 
-        // Primary: depth endpoint
-        try {
-          const depthRes = await fetch(
-            `https://api.upstox.com/v2/market-quote/depth?instrument_key=${encoded}&mode=full`,
-            { headers },
-          );
-          if (depthRes.ok) {
-            const d = await depthRes.json();
+        // Primary: backend proxy (bypasses CORS)
+        if (backendActor) {
+          try {
+            const raw = await backendActor.getMarketDepth(encoded, token);
+            const d = JSON.parse(raw);
             depthParsed = parseDepthFromResponse(d);
-          }
-        } catch {}
+          } catch {}
+        }
 
-        // Fallback: full quotes endpoint (includes depth)
+        // Fallback: direct fetch (may be blocked by CORS)
         if (
           !depthParsed ||
           (depthParsed.bids.length === 0 && depthParsed.asks.length === 0)
@@ -4532,6 +4533,7 @@ function OptionChainTab({
           side={sidePanel.side}
           strikePrice={sidePanel.strikePrice}
           token={token}
+          backendActor={backendActorRef.current}
           onClose={() => setSidePanel(null)}
         />
       )}

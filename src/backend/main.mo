@@ -32,4 +32,11 @@ actor {
     let headers = buildHeaders(apiKey);
     await OutCall.httpGetRequest(url, headers, transform);
   };
+
+  public func getMarketDepth(instrumentKey : Text, apiKey : Text) : async Text {
+    let encoded = instrumentKey;
+    let url = "https://api.upstox.com/v2/market-quote/quotes?instrument_key=" # encoded # "&mode=full";
+    let headers = buildHeaders(apiKey);
+    await OutCall.httpGetRequest(url, headers, transform);
+  };
 };
