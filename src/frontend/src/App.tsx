@@ -2057,60 +2057,291 @@ function TrendAnalysisPanel({
     )
     .slice(0, 3);
 
-  // ── Multi-signal trend determination ──────────────────────────────────────
+  // ── Multi-signal trend determination (10 signals total) ─────────────────
   let bullSignals = 0;
   let bearSignals = 0;
+  const signalDetails: {
+    label: string;
+    bull: boolean | null;
+    reason: string;
+  }[] = [];
 
-  // Signal 1: PCR
-  if (PCR > 1.2) bullSignals++;
-  else if (PCR < 0.8) bearSignals++;
+  // Signal 1: PCR — wider thresholds so neutral market still scores
+  if (PCR > 1.0) {
+    bullSignals++;
+    signalDetails.push({
+      label: "PCR",
+      bull: true,
+      reason: `PCR ${PCR.toFixed(2)} > 1.0 — Put writing dominance, bullish`,
+    });
+  } else if (PCR < 0.9) {
+    bearSignals++;
+    signalDetails.push({
+      label: "PCR",
+      bull: false,
+      reason: `PCR ${PCR.toFixed(2)} < 0.9 — Call writing dominance, bearish`,
+    });
+  } else
+    signalDetails.push({
+      label: "PCR",
+      bull: null,
+      reason: `PCR ${PCR.toFixed(2)} — neutral zone`,
+    });
 
   // Signal 2: Max pain vs ATM
-  if (atm && maxPainStrike < atm.strike_price) bullSignals++;
-  else if (atm && maxPainStrike > atm.strike_price) bearSignals++;
+  if (atm && maxPainStrike < atm.strike_price) {
+    bullSignals++;
+    signalDetails.push({
+      label: "MaxPain",
+      bull: true,
+      reason: `Max Pain ${maxPainStrike} below ATM — upward pull`,
+    });
+  } else if (atm && maxPainStrike > atm.strike_price) {
+    bearSignals++;
+    signalDetails.push({
+      label: "MaxPain",
+      bull: false,
+      reason: `Max Pain ${maxPainStrike} above ATM — downward pull`,
+    });
+  } else
+    signalDetails.push({
+      label: "MaxPain",
+      bull: null,
+      reason: "Max Pain at ATM — no directional pull",
+    });
 
-  // Signal 3: CE resistance above ATM = bullish bias (market above support)
-  if (atm && maxCeOiRow.strike_price > atm.strike_price) bullSignals++;
-  else bearSignals++;
+  // Signal 3: CE max OI (resistance) — is it well above ATM?
+  if (atm && maxCeOiRow.strike_price > atm.strike_price) {
+    bullSignals++;
+    signalDetails.push({
+      label: "CE Wall",
+      bull: true,
+      reason: `CE resistance at ${maxCeOiRow.strike_price} above ATM — upside room`,
+    });
+  } else {
+    bearSignals++;
+    signalDetails.push({
+      label: "CE Wall",
+      bull: false,
+      reason: "CE wall at/below ATM — capped upside",
+    });
+  }
 
-  // Signal 4: PE support below ATM = bullish
-  if (atm && maxPeOiRow.strike_price < atm.strike_price) bullSignals++;
-  else bearSignals++;
+  // Signal 4: PE max OI (support) — is it below ATM?
+  if (atm && maxPeOiRow.strike_price < atm.strike_price) {
+    bullSignals++;
+    signalDetails.push({
+      label: "PE Wall",
+      bull: true,
+      reason: `PE support at ${maxPeOiRow.strike_price} below ATM — downside protected`,
+    });
+  } else {
+    bearSignals++;
+    signalDetails.push({
+      label: "PE Wall",
+      bull: false,
+      reason: "PE wall at/above ATM — breakdown risk",
+    });
+  }
 
-  // Signal 5: Greeks-based delta momentum
+  // Signal 5: Delta momentum — relaxed thresholds
   if (greeksData && atm) {
     const atmCeKey5 = atm.call_options?.instrument_key;
     const atmCeDelta = atmCeKey5 ? (greeksData[atmCeKey5]?.delta ?? 0) : 0;
-    if (atmCeDelta > 0.52) bullSignals++;
-    else if (atmCeDelta < 0.48 && atmCeDelta !== 0) bearSignals++;
-  }
+    if (atmCeDelta > 0.5) {
+      bullSignals++;
+      signalDetails.push({
+        label: "Delta",
+        bull: true,
+        reason: `CE Delta ${atmCeDelta.toFixed(3)} > 0.50 — bullish momentum`,
+      });
+    } else if (atmCeDelta > 0 && atmCeDelta < 0.5) {
+      bearSignals++;
+      signalDetails.push({
+        label: "Delta",
+        bull: false,
+        reason: `CE Delta ${atmCeDelta.toFixed(3)} < 0.50 — bearish momentum`,
+      });
+    } else
+      signalDetails.push({
+        label: "Delta",
+        bull: null,
+        reason: "Delta data unavailable",
+      });
+  } else
+    signalDetails.push({
+      label: "Delta",
+      bull: null,
+      reason: "Greeks not loaded",
+    });
 
-  // Signal 6: OI buildup — if majority of top 3 CE OI strikes above ATM = bullish
+  // Signal 6: OI concentration — top CE/PE buildup positioning
   const ceAboveAtm = atm
     ? top3CeOI.filter((r) => r.strike_price > atm.strike_price).length
     : 0;
   const peBelowAtm = atm
     ? top3PeOI.filter((r) => r.strike_price < atm.strike_price).length
     : 0;
-  if (ceAboveAtm >= 2 && peBelowAtm >= 2) bullSignals++;
-  else if (ceAboveAtm <= 1 || peBelowAtm <= 1) bearSignals++;
+  if (ceAboveAtm >= 2 && peBelowAtm >= 2) {
+    bullSignals++;
+    signalDetails.push({
+      label: "OI Zone",
+      bull: true,
+      reason: `CE OI above ATM (${ceAboveAtm}/3), PE OI below ATM (${peBelowAtm}/3) — range bullish`,
+    });
+  } else if (ceAboveAtm <= 1 || peBelowAtm <= 1) {
+    bearSignals++;
+    signalDetails.push({
+      label: "OI Zone",
+      bull: false,
+      reason: `OI concentration not supportive — ${ceAboveAtm}/3 CE above, ${peBelowAtm}/3 PE below`,
+    });
+  } else
+    signalDetails.push({
+      label: "OI Zone",
+      bull: null,
+      reason: "OI distribution neutral",
+    });
 
-  // Signal 7: IV skew
+  // Signal 7: IV skew — relaxed to 1% difference
   if (greeksData && atm) {
     const ceKeyS7 = atm.call_options?.instrument_key;
     const peKeyS7 = atm.put_options?.instrument_key;
     const ceIV_s7 = ceKeyS7 ? (greeksData[ceKeyS7]?.iv ?? 0) : 0;
     const peIV_s7 = peKeyS7 ? (greeksData[peKeyS7]?.iv ?? 0) : 0;
-    if (peIV_s7 - ceIV_s7 > 2) bearSignals++;
-    else if (ceIV_s7 - peIV_s7 > 2) bullSignals++;
-  }
+    if (ceIV_s7 > 0 && peIV_s7 > 0) {
+      if (peIV_s7 - ceIV_s7 > 1) {
+        bearSignals++;
+        signalDetails.push({
+          label: "IV Skew",
+          bull: false,
+          reason: `PE IV ${peIV_s7.toFixed(1)}% > CE IV ${ceIV_s7.toFixed(1)}% — fear premium, bearish`,
+        });
+      } else if (ceIV_s7 - peIV_s7 > 1) {
+        bullSignals++;
+        signalDetails.push({
+          label: "IV Skew",
+          bull: true,
+          reason: `CE IV ${ceIV_s7.toFixed(1)}% > PE IV ${peIV_s7.toFixed(1)}% — call demand, bullish`,
+        });
+      } else
+        signalDetails.push({
+          label: "IV Skew",
+          bull: null,
+          reason: `IV near-parity (CE ${ceIV_s7.toFixed(1)}% / PE ${peIV_s7.toFixed(1)}%)`,
+        });
+    } else
+      signalDetails.push({
+        label: "IV Skew",
+        bull: null,
+        reason: "IV data unavailable",
+      });
+  } else
+    signalDetails.push({
+      label: "IV Skew",
+      bull: null,
+      reason: "Greeks not loaded",
+    });
+
+  // Signal 8: CE vs PE total OI ratio (broad market sentiment)
+  const oiRatio = totalCE_OI > 0 ? totalPE_OI / totalCE_OI : 0;
+  if (oiRatio > 1.1) {
+    bullSignals++;
+    signalDetails.push({
+      label: "OI Ratio",
+      bull: true,
+      reason: `PE/CE OI ratio ${oiRatio.toFixed(2)} — put writers dominant, bullish underpinning`,
+    });
+  } else if (oiRatio < 0.85) {
+    bearSignals++;
+    signalDetails.push({
+      label: "OI Ratio",
+      bull: false,
+      reason: `PE/CE OI ratio ${oiRatio.toFixed(2)} — call writers dominant, bearish`,
+    });
+  } else
+    signalDetails.push({
+      label: "OI Ratio",
+      bull: null,
+      reason: `OI ratio ${oiRatio.toFixed(2)} — balanced`,
+    });
+
+  // Signal 9: Spot vs Max Pain distance — how far is market from pain?
+  const painDist = atm ? underlyingLtp - maxPainStrike : 0;
+  if (painDist > 0 && atm) {
+    bearSignals++;
+    signalDetails.push({
+      label: "Pain Pull",
+      bull: false,
+      reason: `Spot ${Math.abs(painDist).toFixed(0)} pts above max pain — gravitational pull down`,
+    });
+  } else if (painDist < 0 && atm) {
+    bullSignals++;
+    signalDetails.push({
+      label: "Pain Pull",
+      bull: true,
+      reason: `Spot ${Math.abs(painDist).toFixed(0)} pts below max pain — gravitational pull up`,
+    });
+  } else
+    signalDetails.push({
+      label: "Pain Pull",
+      bull: null,
+      reason: "Spot at max pain",
+    });
+
+  // Signal 10: Vega environment — high vega favours buying options
+  if (greeksData && atm) {
+    const atmCeKeyV = atm.call_options?.instrument_key;
+    const atmVegaV = atmCeKeyV ? (greeksData[atmCeKeyV]?.vega ?? 0) : 0;
+    if (atmVegaV > 5) {
+      bullSignals++;
+      signalDetails.push({
+        label: "Vega",
+        bull: true,
+        reason: `Vega ${atmVegaV.toFixed(1)} — rich option premium, long options favoured`,
+      });
+    } else if (atmVegaV > 0 && atmVegaV < 2) {
+      bearSignals++;
+      signalDetails.push({
+        label: "Vega",
+        bull: false,
+        reason: `Vega ${atmVegaV.toFixed(1)} low — thin premium, long options disadvantaged`,
+      });
+    } else
+      signalDetails.push({
+        label: "Vega",
+        bull: null,
+        reason:
+          atmVegaV > 0
+            ? `Vega ${atmVegaV.toFixed(1)} neutral`
+            : "Vega data unavailable",
+      });
+  } else
+    signalDetails.push({
+      label: "Vega",
+      bull: null,
+      reason: "Greeks not loaded",
+    });
 
   const trend =
-    bullSignals >= 3 ? "BULLISH" : bearSignals >= 3 ? "BEARISH" : "NEUTRAL";
+    bullSignals >= 4 ? "BULLISH" : bearSignals >= 4 ? "BEARISH" : "NEUTRAL";
 
-  // ── Confidence based on signal strength (8 total signals) ─────────────────
+  // ── Confidence based on signal strength (10 total signals) ────────────────
   const maxSig = Math.max(bullSignals, bearSignals);
-  const confidence = maxSig >= 6 ? "HIGH" : maxSig >= 4 ? "MEDIUM" : "LOW";
+  const confidence = maxSig >= 7 ? "HIGH" : maxSig >= 5 ? "MEDIUM" : "LOW";
+
+  // ── Signal score as percentage ─────────────────────────────────────────────
+  const signalScorePct = Math.round((maxSig / 10) * 100);
+
+  // ── OI trend: is total OI growing (buildup) or shrinking (unwinding)? ─────
+  // We track via ref — compare previous total OI to current
+  const totalChainOI = chain.reduce(
+    (s, r) =>
+      s +
+      (r.call_options?.market_data?.oi ?? 0) +
+      (r.put_options?.market_data?.oi ?? 0),
+    0,
+  );
 
   // ── Auto-select best strike ────────────────────────────────────────────────
   let recommendedStrike = atm?.strike_price ?? 0;
@@ -2174,13 +2405,15 @@ function TrendAnalysisPanel({
   const atmPeIV = greeksData?.[atmPeKey]?.iv ?? null;
 
   // ── High-conviction signal gate ───────────────────────────────────────────
-  // (must be after atmIV declaration)
+  // Relaxed: MEDIUM+ confidence, 4+ same-direction signals, IV < 80 (allow high-vol env)
+  const dominantSignals =
+    trend === "BULLISH" ? bullSignals : trend === "BEARISH" ? bearSignals : 0;
   const isHighConviction =
     chain.length > 0 &&
-    confidence === "HIGH" &&
+    (confidence === "HIGH" || confidence === "MEDIUM") &&
     trend !== "NEUTRAL" &&
-    bullSignals + bearSignals >= 6 &&
-    (atmIV === null || atmIV < 40) &&
+    dominantSignals >= 4 &&
+    (atmIV === null || atmIV < 80) &&
     recLtp > 0;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional signal fire
@@ -2415,7 +2648,7 @@ function TrendAnalysisPanel({
                   <div
                     className="h-full rounded-full transition-all duration-500"
                     style={{
-                      width: `${Math.round((Math.max(bullSignals, bearSignals) / 8) * 100)}%`,
+                      width: `${signalScorePct}%`,
                       background:
                         trend === "BULLISH"
                           ? "oklch(0.64 0.2 145)"
@@ -2426,7 +2659,7 @@ function TrendAnalysisPanel({
                   />
                 </div>
                 <span className="text-[9px] text-foreground/70 font-mono-data shrink-0">
-                  {trend === "BULLISH" ? bullSignals : bearSignals}/8
+                  {trend === "BULLISH" ? bullSignals : bearSignals}/10
                 </span>
               </div>
               <span className="text-[10px] text-foreground/80 font-semibold ml-auto">
@@ -2583,6 +2816,33 @@ function TrendAnalysisPanel({
               </div>
             )}
 
+            {/* Signal Breakdown Grid */}
+            <div className="mb-3">
+              <p className="text-[9px] text-foreground font-bold uppercase tracking-widest mb-1.5">
+                Signal Breakdown ({bullSignals}↑ {bearSignals}↓ out of 10)
+              </p>
+              <div className="grid grid-cols-5 gap-1">
+                {signalDetails.map((sig) => (
+                  <div
+                    key={sig.label}
+                    title={sig.reason}
+                    className={`text-center px-1 py-1 rounded border text-[8px] font-bold cursor-help transition-colors ${
+                      sig.bull === true
+                        ? "bg-green-950/50 border-green-700/40 text-green-300"
+                        : sig.bull === false
+                          ? "bg-red-950/50 border-red-700/40 text-red-300"
+                          : "bg-secondary/20 border-border/30 text-foreground/40"
+                    }`}
+                  >
+                    <div>{sig.label}</div>
+                    <div className="text-[10px] mt-0.5">
+                      {sig.bull === true ? "▲" : sig.bull === false ? "▼" : "—"}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
             {/* Best Strike Suggestions */}
             {(bestCeStrike || bestPeStrike) && (
               <div className="grid grid-cols-2 gap-2 mb-2">
@@ -2737,26 +2997,41 @@ function TrendAnalysisPanel({
                     {oiMomentumRow.strike_price.toLocaleString("en-IN")}
                   </span>
                 </span>
+                <span className="text-foreground font-semibold">
+                  Score{" "}
+                  <span
+                    className={`font-mono-data font-bold ${signalScorePct >= 60 ? "text-green-300" : signalScorePct >= 40 ? "text-amber-300" : "text-foreground/60"}`}
+                  >
+                    {signalScorePct}%
+                  </span>
+                </span>
                 <span className="text-[9px] text-foreground/70 italic ml-auto">
-                  tap/hover for analysis
+                  tap for signals
                 </span>
               </div>
-              {/* Hover tooltip — full reasoning */}
+              {/* Hover tooltip — full signal reasoning */}
               <div
                 className={`absolute left-0 top-full mt-1 z-50 w-full p-2 rounded-md border border-border shadow-xl space-y-1 ${reasoningOpen ? "visible opacity-100" : "invisible opacity-0"} hover:visible hover:opacity-100 transition-opacity duration-150`}
                 style={{ background: "oklch(0.13 0.012 250)" }}
               >
-                {reasoning.map((line, i) => {
-                  const icons = ["📊", "🎯", "📈", "📉", "⚡", "🔥", "⚠️"];
-                  return line ? (
-                    <p
-                      key={line.slice(0, 30)}
-                      className="text-[11px] text-foreground/80 leading-relaxed"
-                    >
-                      {icons[i] ?? "•"} {line}
-                    </p>
-                  ) : null;
-                })}
+                <p className="text-[10px] font-bold text-foreground/90 mb-1 border-b border-border pb-1">
+                  Signal Analysis — {bullSignals} Bullish · {bearSignals}{" "}
+                  Bearish · {10 - bullSignals - bearSignals} Neutral
+                </p>
+                {signalDetails.map((sig) => (
+                  <p
+                    key={sig.label}
+                    className={`text-[11px] leading-relaxed font-medium ${sig.bull === true ? "text-green-300" : sig.bull === false ? "text-red-300" : "text-foreground/50"}`}
+                  >
+                    {sig.bull === true ? "▲" : sig.bull === false ? "▼" : "·"}{" "}
+                    <span className="font-bold">[{sig.label}]</span>{" "}
+                    {sig.reason}
+                  </p>
+                ))}
+                <p className="text-[10px] text-foreground/60 mt-1 border-t border-border pt-1">
+                  Total Chain OI: {(totalChainOI / 100000).toFixed(1)}L
+                  contracts
+                </p>
               </div>
             </div>
           </div>
@@ -3491,7 +3766,7 @@ function SignalMonitorPanel({
           Signal Monitor
         </p>
         <span className="text-[9px] px-1.5 py-0.5 rounded bg-primary/20 text-primary font-mono font-bold border border-primary/30">
-          {todayCount}/3 today
+          {todayCount}/5 today
         </span>
         <span className="text-[10px] text-foreground/70 font-semibold ml-auto">
           Win {winPct}% · {activeSignals} active
@@ -3765,7 +4040,7 @@ function OptionChainTab({
       const today = new Date().toISOString().slice(0, 10);
       const existing = loadSignals();
       const todayCount = existing.filter((s) => s.date === today).length;
-      if (todayCount >= 3) return;
+      if (todayCount >= 5) return;
       const newSignal: GeneratedSignal = {
         ...raw,
         instrument: raw.instrument ?? underlying,
@@ -3787,7 +4062,7 @@ function OptionChainTab({
       const key = `${raw.action}-${raw.strike}-${raw.expiry}`;
       if (pendingSignalRef.current?.key === key) {
         pendingSignalRef.current.count++;
-        if (pendingSignalRef.current.count >= 3) {
+        if (pendingSignalRef.current.count >= 2) {
           const existing = loadSignals();
           const recentDuplicate = existing.find(
             (s) =>
