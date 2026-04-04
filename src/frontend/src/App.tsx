@@ -66,92 +66,6 @@ import { toast } from "sonner";
 import { ExternalBlob, createActor } from "./backend";
 import { loadConfig } from "./config";
 
-// ─── Black-Scholes Functions ──────────────────────────────────────────────────
-function normCDF(x: number): number {
-  const a1 = 0.254829592;
-  const a2 = -0.284496736;
-  const a3 = 1.421413741;
-  const a4 = -1.453152027;
-  const a5 = 1.061405429;
-  const p = 0.3275911;
-  const sign = x < 0 ? -1 : 1;
-  const t = 1.0 / (1.0 + p * Math.abs(x));
-  const y =
-    1.0 -
-    ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp((-x * x) / 2);
-  return 0.5 * (1.0 + sign * y);
-}
-
-function normPDF(x: number): number {
-  return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
-}
-
-function blackScholes(
-  S: number,
-  K: number,
-  T: number,
-  r: number,
-  sigma: number,
-  type: "CE" | "PE",
-) {
-  if (T <= 0 || sigma <= 0 || S <= 0 || K <= 0) {
-    return {
-      price: 0,
-      delta: type === "CE" ? 0.5 : -0.5,
-      gamma: 0,
-      theta: 0,
-      vega: 0,
-    };
-  }
-  const d1 =
-    (Math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T));
-  const d2 = d1 - sigma * Math.sqrt(T);
-  const sqrtT = Math.sqrt(T);
-  const nd1 = normCDF(d1);
-  const nd2 = normCDF(d2);
-  const nnd1 = normCDF(-d1);
-  const nnd2 = normCDF(-d2);
-  const price =
-    type === "CE"
-      ? S * nd1 - K * Math.exp(-r * T) * nd2
-      : K * Math.exp(-r * T) * nnd2 - S * nnd1;
-  const delta = type === "CE" ? nd1 : nd1 - 1;
-  const gamma = normPDF(d1) / (S * sigma * sqrtT);
-  const theta =
-    type === "CE"
-      ? (-(S * normPDF(d1) * sigma) / (2 * sqrtT) -
-          r * K * Math.exp(-r * T) * nd2) /
-        365
-      : (-(S * normPDF(d1) * sigma) / (2 * sqrtT) +
-          r * K * Math.exp(-r * T) * nnd2) /
-        365;
-  const vega = (S * normPDF(d1) * sqrtT) / 100;
-  return { price, delta, gamma, theta, vega };
-}
-
-function impliedVolatility(
-  marketPrice: number,
-  S: number,
-  K: number,
-  T: number,
-  r: number,
-  type: "CE" | "PE",
-): number {
-  if (marketPrice <= 0 || T <= 0) return 0.2;
-  let sigma = 0.25;
-  for (let i = 0; i < 100; i++) {
-    const { price, vega } = blackScholes(S, K, T, r, sigma, type);
-    const diff = price - marketPrice;
-    if (Math.abs(diff) < 0.001) break;
-    const vegaActual = vega * 100;
-    if (Math.abs(vegaActual) < 1e-8) break;
-    sigma = sigma - diff / vegaActual;
-    if (sigma < 0.001) sigma = 0.001;
-    if (sigma > 5) sigma = 5;
-  }
-  return sigma;
-}
-
 // ─── Theme ────────────────────────────────────────────────────────────────────
 function useTheme() {
   const [theme, setTheme] = useState<"dark" | "light">(() => {
@@ -277,11 +191,41 @@ interface OptionData {
   lot_size?: number;
   call_options?: {
     instrument_key?: string;
-    market_data?: { ltp?: number; oi?: number; volume?: number; iv?: number };
+    market_data?: {
+      ltp?: number;
+      oi?: number;
+      prev_oi?: number;
+      volume?: number;
+      iv?: number;
+      close_price?: number;
+    };
+    option_greeks?: {
+      delta?: number;
+      gamma?: number;
+      theta?: number;
+      vega?: number;
+      iv?: number;
+      pop?: number;
+    };
   };
   put_options?: {
     instrument_key?: string;
-    market_data?: { ltp?: number; oi?: number; volume?: number; iv?: number };
+    market_data?: {
+      ltp?: number;
+      oi?: number;
+      prev_oi?: number;
+      volume?: number;
+      iv?: number;
+      close_price?: number;
+    };
+    option_greeks?: {
+      delta?: number;
+      gamma?: number;
+      theta?: number;
+      vega?: number;
+      iv?: number;
+      pop?: number;
+    };
   };
 }
 
@@ -4191,9 +4135,73 @@ function OptionChainTab({
     );
     if (res.data) {
       const arr = Array.isArray(res.data) ? res.data : [];
-      setChain(
-        arr.sort((a, b) => (a.strike_price ?? 0) - (b.strike_price ?? 0)),
+      const sorted = arr.sort(
+        (a, b) => (a.strike_price ?? 0) - (b.strike_price ?? 0),
       );
+      setChain(sorted);
+
+      // Extract Greeks directly from the option chain response (Upstox values)
+      const newGreeks: Record<
+        string,
+        {
+          delta?: number;
+          gamma?: number;
+          theta?: number;
+          vega?: number;
+          iv?: number;
+        }
+      > = {};
+      const newOiChange: Record<string, { abs: number; pct: number }> = {};
+      for (const row of sorted) {
+        if (
+          row.call_options?.instrument_key &&
+          row.call_options.option_greeks
+        ) {
+          const g = row.call_options.option_greeks;
+          newGreeks[row.call_options.instrument_key] = {
+            delta: g.delta,
+            gamma: g.gamma,
+            theta: g.theta,
+            vega: g.vega,
+            iv: g.iv,
+          };
+        }
+        if (row.put_options?.instrument_key && row.put_options.option_greeks) {
+          const g = row.put_options.option_greeks;
+          newGreeks[row.put_options.instrument_key] = {
+            delta: g.delta,
+            gamma: g.gamma,
+            theta: g.theta,
+            vega: g.vega,
+            iv: g.iv,
+          };
+        }
+        // OI change = oi - prev_oi (from Upstox, represents change since previous close)
+        if (row.call_options?.instrument_key && row.call_options.market_data) {
+          const md = row.call_options.market_data;
+          const oi = md.oi ?? 0;
+          const prevOi = md.prev_oi ?? 0;
+          if (prevOi > 0) {
+            newOiChange[row.call_options.instrument_key] = {
+              abs: oi - prevOi,
+              pct: ((oi - prevOi) / prevOi) * 100,
+            };
+          }
+        }
+        if (row.put_options?.instrument_key && row.put_options.market_data) {
+          const md = row.put_options.market_data;
+          const oi = md.oi ?? 0;
+          const prevOi = md.prev_oi ?? 0;
+          if (prevOi > 0) {
+            newOiChange[row.put_options.instrument_key] = {
+              abs: oi - prevOi,
+              pct: ((oi - prevOi) / prevOi) * 100,
+            };
+          }
+        }
+      }
+      if (Object.keys(newGreeks).length > 0) setGreeksData(newGreeks);
+      if (Object.keys(newOiChange).length > 0) setOiChangeData(newOiChange);
     } else {
       if (!silent) toast.error(`Option chain: ${res.error}`);
     }
@@ -4245,8 +4253,9 @@ function OptionChainTab({
       }
     >
   >({});
-  const [oiChangeData, setOiChangeData] = useState<Record<string, number>>({});
-  const prevOIRef = useRef<Record<string, number>>({});
+  const [oiChangeData, setOiChangeData] = useState<
+    Record<string, { abs: number; pct: number }>
+  >({});
   const backendActorRef = useRef<any>(null);
   useEffect(() => {
     loadConfig().then((cfg) => {
@@ -4278,161 +4287,8 @@ function OptionChainTab({
     if (node) node.scrollIntoView({ block: "center", behavior: "smooth" });
   }, []);
 
-  // Calculate Greeks locally using Black-Scholes every second (fallback when backend data unavailable)
-  useEffect(() => {
-    if (!expiry || displayChain.length === 0 || underlyingLtp <= 0) return;
-
-    const calcAllGreeks = () => {
-      const today = new Date();
-      const expiryDate = new Date(expiry);
-      const T = Math.max(
-        (expiryDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24 * 365),
-        0.001,
-      );
-      const r = 0.065;
-      const S = underlyingLtp;
-
-      const newGreeks: Record<
-        string,
-        {
-          delta?: number;
-          gamma?: number;
-          theta?: number;
-          vega?: number;
-          iv?: number;
-        }
-      > = {};
-
-      for (const row of displayChain) {
-        if (row.call_options?.instrument_key) {
-          const K = row.strike_price;
-          const ltp = row.call_options.market_data?.ltp ?? 0;
-          const iv = ltp > 0 ? impliedVolatility(ltp, S, K, T, r, "CE") : 0.2;
-          const greeks = blackScholes(S, K, T, r, iv, "CE");
-          newGreeks[row.call_options.instrument_key] = {
-            delta: greeks.delta,
-            gamma: greeks.gamma,
-            theta: greeks.theta,
-            vega: greeks.vega,
-            iv: iv * 100,
-          };
-        }
-        if (row.put_options?.instrument_key) {
-          const K = row.strike_price;
-          const ltp = row.put_options.market_data?.ltp ?? 0;
-          const iv = ltp > 0 ? impliedVolatility(ltp, S, K, T, r, "PE") : 0.2;
-          const greeks = blackScholes(S, K, T, r, iv, "PE");
-          newGreeks[row.put_options.instrument_key] = {
-            delta: greeks.delta,
-            gamma: greeks.gamma,
-            theta: greeks.theta,
-            vega: greeks.vega,
-            iv: iv * 100,
-          };
-        }
-      }
-      setGreeksData(newGreeks);
-    };
-
-    calcAllGreeks();
-    const id = setInterval(calcAllGreeks, 1000);
-    return () => clearInterval(id);
-  }, [expiry, displayChain, underlyingLtp]);
-
-  // Fetch Greeks from backend proxy every 5 seconds for accurate Upstox values
-  useEffect(() => {
-    if (!token || displayChain.length === 0) return;
-    const fetchGreeks = async () => {
-      if (!backendActorRef.current) return;
-      try {
-        const keys = displayChain
-          .flatMap((row) => [
-            row.call_options?.instrument_key,
-            row.put_options?.instrument_key,
-          ])
-          .filter(Boolean)
-          .join(",");
-        const raw = await backendActorRef.current.getOptionGreeks(keys, token);
-        const parsed = JSON.parse(raw);
-        if (parsed?.data) {
-          const newGreeks: Record<
-            string,
-            {
-              delta?: number;
-              gamma?: number;
-              theta?: number;
-              vega?: number;
-              iv?: number;
-            }
-          > = {};
-          for (const [key, val] of Object.entries<any>(parsed.data)) {
-            newGreeks[key] = {
-              delta: val.delta,
-              gamma: val.gamma,
-              theta: val.theta,
-              vega: val.vega,
-              iv: val.iv,
-            };
-          }
-          setGreeksData((prev) => {
-            const merged = { ...prev };
-            for (const [key, val] of Object.entries(newGreeks)) {
-              merged[key] = {
-                ...prev[key],
-                ...(val.delta != null && Number.isFinite(val.delta)
-                  ? { delta: val.delta }
-                  : {}),
-                ...(val.gamma != null && Number.isFinite(val.gamma)
-                  ? { gamma: val.gamma }
-                  : {}),
-                ...(val.theta != null && Number.isFinite(val.theta)
-                  ? { theta: val.theta }
-                  : {}),
-                ...(val.vega != null && Number.isFinite(val.vega)
-                  ? { vega: val.vega }
-                  : {}),
-                ...(val.iv != null && Number.isFinite(val.iv)
-                  ? { iv: val.iv }
-                  : {}),
-              };
-            }
-            return merged;
-          });
-        }
-      } catch (_e) {
-        // silently fail, keep existing data or fall back to Black-Scholes
-      }
-    };
-    fetchGreeks();
-    const id = setInterval(fetchGreeks, 1000);
-    return () => clearInterval(id);
-  }, [token, displayChain]);
-
-  // Track OI changes every second
-  useEffect(() => {
-    if (displayChain.length === 0) return;
-    const id = setInterval(() => {
-      setOiChangeData(() => {
-        const next: Record<string, number> = {};
-        for (const row of displayChain) {
-          const ceKey = row.call_options?.instrument_key;
-          const peKey = row.put_options?.instrument_key;
-          const ceOI = row.call_options?.market_data?.oi ?? 0;
-          const peOI = row.put_options?.market_data?.oi ?? 0;
-          if (ceKey) {
-            next[ceKey] = ceOI - (prevOIRef.current[ceKey] ?? ceOI);
-            prevOIRef.current[ceKey] = ceOI;
-          }
-          if (peKey) {
-            next[peKey] = peOI - (prevOIRef.current[peKey] ?? peOI);
-            prevOIRef.current[peKey] = peOI;
-          }
-        }
-        return next;
-      });
-    }, 1000);
-    return () => clearInterval(id);
-  }, [displayChain]);
+  // Greeks and OI changes are extracted directly from the Upstox option chain API
+  // response in fetchChain() -- no separate calculation needed.
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -4666,17 +4522,23 @@ function OptionChainTab({
                           className="py-1.5 px-1 text-right font-mono-data text-[9px]"
                           style={{
                             color:
-                              ceIk && oiChangeData[ceIk] > 0
+                              ceIk && (oiChangeData[ceIk]?.abs ?? 0) > 0
                                 ? "oklch(0.64 0.2 145)"
-                                : ceIk && oiChangeData[ceIk] < 0
+                                : ceIk && (oiChangeData[ceIk]?.abs ?? 0) < 0
                                   ? "oklch(0.62 0.22 22)"
                                   : "oklch(0.64 0.2 145 / 0.4)",
                           }}
                         >
-                          {ceIk &&
-                          oiChangeData[ceIk] != null &&
-                          oiChangeData[ceIk] !== 0
-                            ? `${oiChangeData[ceIk] > 0 ? "+" : ""}${(oiChangeData[ceIk] / 1000).toFixed(1)}K`
+                          {ceIk && oiChangeData[ceIk] != null
+                            ? (() => {
+                                const { abs, pct } = oiChangeData[ceIk];
+                                const sign = abs > 0 ? "+" : "";
+                                const absStr =
+                                  Math.abs(abs) >= 100000
+                                    ? `${sign}${(abs / 100000).toFixed(2)}L`
+                                    : `${sign}${(abs / 1000).toFixed(1)}K`;
+                                return `${absStr} (${sign}${pct.toFixed(1)}%)`;
+                              })()
                             : "—"}
                         </td>
                         <td
@@ -4740,17 +4602,23 @@ function OptionChainTab({
                           className="py-1.5 px-1 text-left font-mono-data text-[9px]"
                           style={{
                             color:
-                              peIk && oiChangeData[peIk] > 0
+                              peIk && (oiChangeData[peIk]?.abs ?? 0) > 0
                                 ? "oklch(0.64 0.2 145)"
-                                : peIk && oiChangeData[peIk] < 0
+                                : peIk && (oiChangeData[peIk]?.abs ?? 0) < 0
                                   ? "oklch(0.62 0.22 22)"
                                   : "oklch(0.62 0.22 22 / 0.4)",
                           }}
                         >
-                          {peIk &&
-                          oiChangeData[peIk] != null &&
-                          oiChangeData[peIk] !== 0
-                            ? `${oiChangeData[peIk] > 0 ? "+" : ""}${(oiChangeData[peIk] / 1000).toFixed(1)}K`
+                          {peIk && oiChangeData[peIk] != null
+                            ? (() => {
+                                const { abs, pct } = oiChangeData[peIk];
+                                const sign = abs > 0 ? "+" : "";
+                                const absStr =
+                                  Math.abs(abs) >= 100000
+                                    ? `${sign}${(abs / 100000).toFixed(2)}L`
+                                    : `${sign}${(abs / 1000).toFixed(1)}K`;
+                                return `${absStr} (${sign}${pct.toFixed(1)}%)`;
+                              })()
                             : "—"}
                         </td>
                         <td
@@ -5730,6 +5598,11 @@ function SetupScreen({
   useTheme();
   const [selectedMode, setSelectedMode] = useState<AppMode | null>(null);
   const [analyticsToken, setAnalyticsToken] = useState("");
+  // Trading login method: "oauth" or "token"
+  const [tradingLoginMethod, setTradingLoginMethod] = useState<
+    "oauth" | "token"
+  >("token");
+  const [tradingAccessToken, setTradingAccessToken] = useState("");
   // Trading OAuth fields
   const [apiKey, setApiKey] = useState(() => LS.get(KEYS.apiKey) ?? "");
   const [apiSecret, setApiSecret] = useState(
@@ -5749,6 +5622,18 @@ function SetupScreen({
     onMode("analytics");
     onToken(analyticsToken.trim());
     toast.success("Connected in Analytics Mode");
+  };
+
+  const handleTradingTokenConnect = () => {
+    if (!tradingAccessToken.trim()) {
+      toast.error("Access Token is required");
+      return;
+    }
+    LS.set(KEYS.token, tradingAccessToken.trim());
+    LS.set(KEYS.mode, "trading");
+    onMode("trading");
+    onToken(tradingAccessToken.trim());
+    toast.success("Connected in Trading Mode");
   };
 
   const handleOAuthLogin = () => {
@@ -5944,6 +5829,7 @@ function SetupScreen({
               borderColor: "oklch(0.55 0.2 145 / 0.4)",
             }}
           >
+            {/* Header */}
             <div
               className="px-4 py-2.5 border-b flex items-center justify-between"
               style={{
@@ -5955,7 +5841,7 @@ function SetupScreen({
                 className="text-[10px] font-bold tracking-widest uppercase"
                 style={{ color: "oklch(0.65 0.2 145)" }}
               >
-                Trading Mode — OAuth Login
+                Trading Mode
               </p>
               <button
                 type="button"
@@ -5965,58 +5851,141 @@ function SetupScreen({
                 ← Back
               </button>
             </div>
-            <div className="p-4 space-y-3">
-              <div>
-                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                  API Key
-                </Label>
-                <Input
-                  data-ocid="setup.trading_api_key.input"
-                  placeholder="Your Upstox API Key"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  className="h-9 mt-1 bg-secondary border-border font-mono text-[11px]"
-                />
-              </div>
-              <div>
-                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                  API Secret
-                </Label>
-                <Input
-                  data-ocid="setup.trading_api_secret.input"
-                  placeholder="Your Upstox API Secret"
-                  value={apiSecret}
-                  onChange={(e) => setApiSecret(e.target.value)}
-                  className="h-9 mt-1 bg-secondary border-border font-mono text-[11px]"
-                  type="password"
-                />
-              </div>
-              <div>
-                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                  Redirect URI
-                </Label>
-                <Input
-                  data-ocid="setup.trading_redirect_uri.input"
-                  placeholder="e.g. https://yourapp.ic0.app"
-                  value={redirectUri}
-                  onChange={(e) => setRedirectUri(e.target.value)}
-                  className="h-9 mt-1 bg-secondary border-border font-mono text-[11px]"
-                />
-                <p className="text-[10px] text-muted-foreground mt-1">
-                  Must match the Redirect URI set in Upstox Developer Console
-                </p>
-              </div>
+
+            {/* Tab switcher */}
+            <div className="flex border-b border-border">
               <button
-                data-ocid="setup.trading_login.button"
                 type="button"
-                onClick={handleOAuthLogin}
-                className="w-full h-10 rounded text-sm font-bold text-white transition-colors flex items-center justify-center gap-2"
-                style={{ background: "oklch(0.5 0.2 145)" }}
+                onClick={() => setTradingLoginMethod("token")}
+                className="flex-1 py-2 text-[10px] font-bold tracking-wide transition-colors"
+                style={{
+                  color:
+                    tradingLoginMethod === "token"
+                      ? "oklch(0.65 0.2 145)"
+                      : "oklch(0.5 0 0)",
+                  borderBottom:
+                    tradingLoginMethod === "token"
+                      ? "2px solid oklch(0.55 0.2 145)"
+                      : "2px solid transparent",
+                  background:
+                    tradingLoginMethod === "token"
+                      ? "oklch(0.55 0.2 145 / 0.08)"
+                      : "transparent",
+                }}
               >
-                <Zap className="w-4 h-4" />
-                Login with Upstox
+                ACCESS TOKEN
+              </button>
+              <button
+                type="button"
+                onClick={() => setTradingLoginMethod("oauth")}
+                className="flex-1 py-2 text-[10px] font-bold tracking-wide transition-colors"
+                style={{
+                  color:
+                    tradingLoginMethod === "oauth"
+                      ? "oklch(0.65 0.2 145)"
+                      : "oklch(0.5 0 0)",
+                  borderBottom:
+                    tradingLoginMethod === "oauth"
+                      ? "2px solid oklch(0.55 0.2 145)"
+                      : "2px solid transparent",
+                  background:
+                    tradingLoginMethod === "oauth"
+                      ? "oklch(0.55 0.2 145 / 0.08)"
+                      : "transparent",
+                }}
+              >
+                OAUTH LOGIN
               </button>
             </div>
+
+            {/* Token paste method */}
+            {tradingLoginMethod === "token" && (
+              <div className="p-4 space-y-3">
+                <div>
+                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                    Access Token
+                  </Label>
+                  <Input
+                    data-ocid="setup.trading_token.input"
+                    placeholder="Paste your Upstox Access Token here"
+                    value={tradingAccessToken}
+                    onChange={(e) => setTradingAccessToken(e.target.value)}
+                    className="h-10 mt-1 bg-secondary border-border font-mono text-[11px]"
+                    type="password"
+                  />
+                  <p className="text-[10px] text-muted-foreground mt-1.5">
+                    Daily access token from Upstox Developer Console or Upstox
+                    app. Full trading enabled.
+                  </p>
+                </div>
+                <button
+                  data-ocid="setup.trading_token_connect.button"
+                  type="button"
+                  onClick={handleTradingTokenConnect}
+                  className="w-full h-10 rounded text-sm font-bold text-white transition-colors flex items-center justify-center gap-2"
+                  style={{ background: "oklch(0.5 0.2 145)" }}
+                >
+                  <Zap className="w-4 h-4" />
+                  Connect in Trading Mode
+                </button>
+              </div>
+            )}
+
+            {/* OAuth method */}
+            {tradingLoginMethod === "oauth" && (
+              <div className="p-4 space-y-3">
+                <div>
+                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                    API Key
+                  </Label>
+                  <Input
+                    data-ocid="setup.trading_api_key.input"
+                    placeholder="Your Upstox API Key"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    className="h-9 mt-1 bg-secondary border-border font-mono text-[11px]"
+                  />
+                </div>
+                <div>
+                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                    API Secret
+                  </Label>
+                  <Input
+                    data-ocid="setup.trading_api_secret.input"
+                    placeholder="Your Upstox API Secret"
+                    value={apiSecret}
+                    onChange={(e) => setApiSecret(e.target.value)}
+                    className="h-9 mt-1 bg-secondary border-border font-mono text-[11px]"
+                    type="password"
+                  />
+                </div>
+                <div>
+                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                    Redirect URI
+                  </Label>
+                  <Input
+                    data-ocid="setup.trading_redirect_uri.input"
+                    placeholder="e.g. https://yourapp.ic0.app"
+                    value={redirectUri}
+                    onChange={(e) => setRedirectUri(e.target.value)}
+                    className="h-9 mt-1 bg-secondary border-border font-mono text-[11px]"
+                  />
+                  <p className="text-[10px] text-muted-foreground mt-1">
+                    Must match the Redirect URI set in Upstox Developer Console
+                  </p>
+                </div>
+                <button
+                  data-ocid="setup.trading_login.button"
+                  type="button"
+                  onClick={handleOAuthLogin}
+                  className="w-full h-10 rounded text-sm font-bold text-white transition-colors flex items-center justify-center gap-2"
+                  style={{ background: "oklch(0.5 0.2 145)" }}
+                >
+                  <Zap className="w-4 h-4" />
+                  Login with Upstox OAuth
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
