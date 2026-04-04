@@ -184,7 +184,10 @@ const KEYS = {
   apiSecret: "upstox_api_secret",
   redirectUri: "upstox_redirect_uri",
   token: "upstox_access_token",
+  mode: "upstox_app_mode",
 };
+
+type AppMode = "analytics" | "trading";
 
 // ─── Index Lot Sizes ─────────────────────────────────────────────────────────
 const INDEX_LOT_SIZES: Record<string, number> = {
@@ -896,6 +899,7 @@ function AppHeader({
   onThemeToggle,
   lastUpdated,
   onSettingsOpen,
+  appMode,
 }: {
   token?: string;
   onDisconnect: () => void;
@@ -907,6 +911,7 @@ function AppHeader({
   onThemeToggle?: () => void;
   lastUpdated?: Date | null;
   onSettingsOpen?: () => void;
+  appMode?: AppMode;
 }) {
   return (
     <header
@@ -929,9 +934,15 @@ function AppHeader({
           <span className="font-display font-bold text-xs tracking-wider text-foreground uppercase hidden sm:block">
             Upstox Connect
           </span>
-          <span className="text-[9px] bg-blue-600 text-white px-1.5 py-0.5 rounded font-bold tracking-wider hidden sm:block">
-            ANALYTICS
-          </span>
+          {appMode === "trading" ? (
+            <span className="text-[9px] bg-green-600 text-white px-1.5 py-0.5 rounded font-bold tracking-wider hidden sm:block">
+              TRADING
+            </span>
+          ) : (
+            <span className="text-[9px] bg-blue-600 text-white px-1.5 py-0.5 rounded font-bold tracking-wider hidden sm:block">
+              ANALYTICS - READ ONLY
+            </span>
+          )}
         </div>
 
         {/* Center: Index chips */}
@@ -1164,9 +1175,12 @@ function TabNav({
 // ─── Positions Tab ─────────────────────────────────────────────────────────────
 function PositionsTab({
   token,
+  analyticsMode,
 }: {
   token: string;
+  analyticsMode?: boolean;
 }) {
+  const _isAnalytics = analyticsMode === true;
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(false);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
@@ -1427,9 +1441,12 @@ function PositionsTab({
 // ─── Holdings Tab ──────────────────────────────────────────────────────────────
 function HoldingsTab({
   token,
+  analyticsMode,
 }: {
   token: string;
+  analyticsMode?: boolean;
 }) {
+  const _isAnalytics = analyticsMode === true;
   const [holdings, setHoldings] = useState<Holding[]>([]);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -3060,6 +3077,7 @@ interface LtpSidePanelProps {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   backendActor?: any;
   onClose: () => void;
+  analyticsMode?: boolean;
 }
 
 // ─── LTP Side Panel Sub-components (memoized to avoid full re-render every second) ─
@@ -3229,7 +3247,9 @@ function LtpSidePanel({
   token,
   backendActor,
   onClose,
+  analyticsMode,
 }: LtpSidePanelProps) {
+  const _isAnalytics = analyticsMode === true;
   const [depth, setDepth] = useState<{
     bids: MarketDepthEntry[];
     asks: MarketDepthEntry[];
@@ -3980,12 +4000,14 @@ function OptionChainTab({
   initialUnderlying,
   tradeSettings,
   onUnderlyingChange,
+  analyticsMode,
 }: {
   token: string;
   indexTicks: Record<string, TickData>;
   initialUnderlying?: string;
   tradeSettings?: TradeSettings;
   onUnderlyingChange?: (underlying: string) => void;
+  analyticsMode?: boolean;
 }) {
   const [underlying, setUnderlying] = useState<string>(
     initialUnderlying ?? "NSE_INDEX|Nifty 50",
@@ -4810,6 +4832,7 @@ function OptionChainTab({
           token={token}
           backendActor={backendActorRef.current}
           onClose={() => setSidePanel(null)}
+          analyticsMode={analyticsMode}
         />
       )}
     </div>
@@ -5444,7 +5467,8 @@ function FundsTab({
 function DashboardScreen({
   token,
   onDisconnect,
-}: { token: string; onDisconnect: () => void }) {
+  appMode,
+}: { token: string; onDisconnect: () => void; appMode: AppMode }) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [funds, setFunds] = useState<Funds | null>(null);
   const [loading, setLoading] = useState(true);
@@ -5525,6 +5549,7 @@ function DashboardScreen({
         onThemeToggle={toggleTheme}
         lastUpdated={lastUpdated}
         onSettingsOpen={() => setSettingsOpen(true)}
+        appMode={appMode}
       />
       <SettingsModal
         open={settingsOpen}
@@ -5591,8 +5616,18 @@ function DashboardScreen({
               <FundsTab funds={funds} loading={loading} />
             )}
 
-            {activeTab === "positions" && <PositionsTab token={token} />}
-            {activeTab === "holdings" && <HoldingsTab token={token} />}
+            {activeTab === "positions" && (
+              <PositionsTab
+                token={token}
+                analyticsMode={appMode === "analytics"}
+              />
+            )}
+            {activeTab === "holdings" && (
+              <HoldingsTab
+                token={token}
+                analyticsMode={appMode === "analytics"}
+              />
+            )}
             {activeTab === "options" && (
               <OptionChainTab
                 token={token}
@@ -5600,6 +5635,7 @@ function DashboardScreen({
                 initialUnderlying={optionUnderlying}
                 tradeSettings={tradeSettings}
                 onUnderlyingChange={setOptionUnderlying}
+                analyticsMode={appMode === "analytics"}
               />
             )}
             {activeTab === "market" && <LiveTab token={token} />}
@@ -5685,18 +5721,49 @@ function DashboardScreen({
 }
 
 // ─── Setup Screen ─────────────────────────────────────────────────────────────
-function SetupScreen({ onToken }: { onToken: (token: string) => void }) {
-  useTheme(); // apply theme class on mount
+function SetupScreen({
+  onToken,
+  onMode,
+}: { onToken: (token: string) => void; onMode: (mode: AppMode) => void }) {
+  useTheme();
+  const [selectedMode, setSelectedMode] = useState<AppMode | null>(null);
   const [analyticsToken, setAnalyticsToken] = useState("");
+  // Trading OAuth fields
+  const [apiKey, setApiKey] = useState(() => LS.get(KEYS.apiKey) ?? "");
+  const [apiSecret, setApiSecret] = useState(
+    () => LS.get(KEYS.apiSecret) ?? "",
+  );
+  const [redirectUri, setRedirectUri] = useState(
+    () => LS.get(KEYS.redirectUri) ?? "",
+  );
 
-  const handleConnect = () => {
+  const handleAnalyticsConnect = () => {
     if (!analyticsToken.trim()) {
       toast.error("Analytics Token is required");
       return;
     }
     LS.set(KEYS.token, analyticsToken.trim());
-    toast.success("Connected!");
+    LS.set(KEYS.mode, "analytics");
+    onMode("analytics");
     onToken(analyticsToken.trim());
+    toast.success("Connected in Analytics Mode");
+  };
+
+  const handleOAuthLogin = () => {
+    if (!apiKey.trim() || !apiSecret.trim() || !redirectUri.trim()) {
+      toast.error("API Key, Secret, and Redirect URI are all required");
+      return;
+    }
+    LS.set(KEYS.apiKey, apiKey.trim());
+    LS.set(KEYS.apiSecret, apiSecret.trim());
+    LS.set(KEYS.redirectUri, redirectUri.trim());
+    LS.set(KEYS.mode, "trading");
+    const params = new URLSearchParams({
+      response_type: "code",
+      client_id: apiKey.trim(),
+      redirect_uri: redirectUri.trim(),
+    });
+    window.location.href = `https://api.upstox.com/v2/login/authorization/dialog?${params.toString()}`;
   };
 
   return (
@@ -5719,57 +5786,237 @@ function SetupScreen({ onToken }: { onToken: (token: string) => void }) {
           <h1 className="font-display font-bold text-xl text-foreground tracking-tight">
             Upstox Connect
           </h1>
-          <div className="flex items-center justify-center gap-2 mt-1">
-            <span className="text-[10px] bg-blue-600 text-white px-2 py-0.5 rounded font-bold tracking-wider">
-              ANALYTICS MODE
-            </span>
-          </div>
           <p className="text-xs text-muted-foreground mt-2">
-            Enter your Analytics Access Token (read-only, valid 1 year)
+            Choose your access mode to continue
           </p>
         </div>
 
-        {/* Analytics Token Input */}
-        <div
-          className="rounded border border-border overflow-hidden"
-          style={{ background: "oklch(var(--card))" }}
-        >
-          <div
-            className="px-4 py-2.5 border-b border-border"
-            style={{ background: "oklch(var(--card))" }}
-          >
-            <p className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
-              Analytics Access Token
-            </p>
-          </div>
-          <div className="p-4 space-y-3">
-            <div>
-              <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                Access Token
-              </Label>
-              <Input
-                data-ocid="setup.analytics_token.input"
-                placeholder="Paste your Analytics Access Token here"
-                value={analyticsToken}
-                onChange={(e) => setAnalyticsToken(e.target.value)}
-                className="h-10 mt-1 bg-secondary border-border font-mono text-[11px]"
-                type="password"
-              />
-              <p className="text-[10px] text-muted-foreground mt-1.5">
-                ⚠️ Do not share this token. Ensure it is stored securely.
-              </p>
-            </div>
+        {/* Mode Selector */}
+        {!selectedMode && (
+          <div className="space-y-3">
+            {/* Analytics Mode Tile */}
             <button
-              data-ocid="setup.connect.button"
+              data-ocid="setup.mode_analytics.button"
               type="button"
-              onClick={handleConnect}
-              className="w-full h-10 rounded text-sm font-bold text-white transition-colors"
-              style={{ background: "oklch(0.62 0.2 250)" }}
+              onClick={() => setSelectedMode("analytics")}
+              className="w-full rounded-lg border-2 p-4 text-left transition-all hover:scale-[1.01] active:scale-[0.99]"
+              style={{
+                borderColor: "oklch(0.55 0.18 250 / 0.6)",
+                background: "oklch(0.62 0.18 250 / 0.08)",
+              }}
             >
-              Connect
+              <div className="flex items-center gap-3">
+                <div
+                  className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0"
+                  style={{ background: "oklch(0.55 0.18 250 / 0.2)" }}
+                >
+                  <Eye
+                    className="w-4 h-4"
+                    style={{ color: "oklch(0.75 0.18 250)" }}
+                  />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-bold text-foreground">
+                      Analytics Mode
+                    </span>
+                    <span className="text-[9px] bg-blue-600 text-white px-1.5 py-0.5 rounded font-bold tracking-wider">
+                      READ ONLY
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    View positions, holdings & option chain. No trading.
+                  </p>
+                  <p
+                    className="text-[10px] mt-1"
+                    style={{ color: "oklch(0.65 0.18 250)" }}
+                  >
+                    Paste your Analytics Access Token (1-year validity)
+                  </p>
+                </div>
+              </div>
+            </button>
+
+            {/* Trading Mode Tile */}
+            <button
+              data-ocid="setup.mode_trading.button"
+              type="button"
+              onClick={() => setSelectedMode("trading")}
+              className="w-full rounded-lg border-2 p-4 text-left transition-all hover:scale-[1.01] active:scale-[0.99]"
+              style={{
+                borderColor: "oklch(0.55 0.2 145 / 0.6)",
+                background: "oklch(0.55 0.2 145 / 0.08)",
+              }}
+            >
+              <div className="flex items-center gap-3">
+                <div
+                  className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0"
+                  style={{ background: "oklch(0.55 0.2 145 / 0.2)" }}
+                >
+                  <TrendingUp
+                    className="w-4 h-4"
+                    style={{ color: "oklch(0.65 0.2 145)" }}
+                  />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-bold text-foreground">
+                      Trading Mode
+                    </span>
+                    <span className="text-[9px] bg-green-600 text-white px-1.5 py-0.5 rounded font-bold tracking-wider">
+                      FULL ACCESS
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    Place orders, manage positions & full platform access.
+                  </p>
+                  <p
+                    className="text-[10px] mt-1"
+                    style={{ color: "oklch(0.65 0.2 145)" }}
+                  >
+                    Login via Upstox OAuth using your API Key & Secret
+                  </p>
+                </div>
+              </div>
             </button>
           </div>
-        </div>
+        )}
+
+        {/* Analytics Mode Form */}
+        {selectedMode === "analytics" && (
+          <div
+            className="rounded border border-border overflow-hidden"
+            style={{ background: "oklch(var(--card))" }}
+          >
+            <div
+              className="px-4 py-2.5 border-b border-border flex items-center justify-between"
+              style={{ background: "oklch(var(--card))" }}
+            >
+              <p className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
+                Analytics Access Token
+              </p>
+              <button
+                type="button"
+                onClick={() => setSelectedMode(null)}
+                className="text-muted-foreground hover:text-foreground transition-colors text-[10px]"
+              >
+                ← Back
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <div>
+                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                  Access Token
+                </Label>
+                <Input
+                  data-ocid="setup.analytics_token.input"
+                  placeholder="Paste your Analytics Access Token here"
+                  value={analyticsToken}
+                  onChange={(e) => setAnalyticsToken(e.target.value)}
+                  className="h-10 mt-1 bg-secondary border-border font-mono text-[11px]"
+                  type="password"
+                />
+                <p className="text-[10px] text-muted-foreground mt-1.5">
+                  ⚠️ Do not share this token. Ensure it is stored securely.
+                </p>
+              </div>
+              <button
+                data-ocid="setup.analytics_connect.button"
+                type="button"
+                onClick={handleAnalyticsConnect}
+                className="w-full h-10 rounded text-sm font-bold text-white transition-colors"
+                style={{ background: "oklch(0.55 0.18 250)" }}
+              >
+                Connect — Analytics Mode
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Trading Mode Form */}
+        {selectedMode === "trading" && (
+          <div
+            className="rounded border overflow-hidden"
+            style={{
+              background: "oklch(var(--card))",
+              borderColor: "oklch(0.55 0.2 145 / 0.4)",
+            }}
+          >
+            <div
+              className="px-4 py-2.5 border-b flex items-center justify-between"
+              style={{
+                background: "oklch(0.55 0.2 145 / 0.08)",
+                borderColor: "oklch(0.55 0.2 145 / 0.3)",
+              }}
+            >
+              <p
+                className="text-[10px] font-bold tracking-widest uppercase"
+                style={{ color: "oklch(0.65 0.2 145)" }}
+              >
+                Trading Mode — OAuth Login
+              </p>
+              <button
+                type="button"
+                onClick={() => setSelectedMode(null)}
+                className="text-muted-foreground hover:text-foreground transition-colors text-[10px]"
+              >
+                ← Back
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <div>
+                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                  API Key
+                </Label>
+                <Input
+                  data-ocid="setup.trading_api_key.input"
+                  placeholder="Your Upstox API Key"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  className="h-9 mt-1 bg-secondary border-border font-mono text-[11px]"
+                />
+              </div>
+              <div>
+                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                  API Secret
+                </Label>
+                <Input
+                  data-ocid="setup.trading_api_secret.input"
+                  placeholder="Your Upstox API Secret"
+                  value={apiSecret}
+                  onChange={(e) => setApiSecret(e.target.value)}
+                  className="h-9 mt-1 bg-secondary border-border font-mono text-[11px]"
+                  type="password"
+                />
+              </div>
+              <div>
+                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                  Redirect URI
+                </Label>
+                <Input
+                  data-ocid="setup.trading_redirect_uri.input"
+                  placeholder="e.g. https://yourapp.ic0.app"
+                  value={redirectUri}
+                  onChange={(e) => setRedirectUri(e.target.value)}
+                  className="h-9 mt-1 bg-secondary border-border font-mono text-[11px]"
+                />
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  Must match the Redirect URI set in Upstox Developer Console
+                </p>
+              </div>
+              <button
+                data-ocid="setup.trading_login.button"
+                type="button"
+                onClick={handleOAuthLogin}
+                className="w-full h-10 rounded text-sm font-bold text-white transition-colors flex items-center justify-center gap-2"
+                style={{ background: "oklch(0.5 0.2 145)" }}
+              >
+                <Zap className="w-4 h-4" />
+                Login with Upstox
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -5778,19 +6025,95 @@ function SetupScreen({ onToken }: { onToken: (token: string) => void }) {
 // ─── App Root ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [token, setToken] = useState(() => LS.get(KEYS.token));
+  const [appMode, setAppMode] = useState<AppMode>(() => {
+    const stored = LS.get(KEYS.mode);
+    return stored === "trading" || stored === "analytics"
+      ? stored
+      : "analytics";
+  });
   const [screen, setScreen] = useState<Screen>(() => {
+    // Check for OAuth callback code in URL
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("code")) return "setup"; // will be handled by useEffect
     if (LS.get(KEYS.token)) return "dashboard";
     return "setup";
   });
+  const [oauthProcessing, setOauthProcessing] = useState(false);
+
+  // Handle OAuth callback: exchange code for access token
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+    if (!code) return;
+
+    // Clear code from URL immediately
+    window.history.replaceState({}, document.title, window.location.pathname);
+
+    const apiKey = LS.get(KEYS.apiKey);
+    const apiSecret = LS.get(KEYS.apiSecret);
+    const redirectUri = LS.get(KEYS.redirectUri);
+
+    if (!apiKey || !apiSecret || !redirectUri) {
+      toast.error("OAuth credentials not found. Please login again.");
+      setScreen("setup");
+      return;
+    }
+
+    setOauthProcessing(true);
+    const body = new URLSearchParams({
+      code,
+      client_id: apiKey,
+      client_secret: apiSecret,
+      redirect_uri: redirectUri,
+      grant_type: "authorization_code",
+    });
+
+    fetch("https://api.upstox.com/v2/login/authorization/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body: body.toString(),
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        const accessToken = d?.access_token;
+        if (accessToken) {
+          LS.set(KEYS.token, accessToken);
+          LS.set(KEYS.mode, "trading");
+          setToken(accessToken);
+          setAppMode("trading");
+          setScreen("dashboard");
+          toast.success("Logged in — Trading Mode");
+        } else {
+          toast.error(
+            `OAuth failed: ${d?.message ?? d?.error ?? "Unknown error"}`,
+          );
+          setScreen("setup");
+        }
+      })
+      .catch(() => {
+        toast.error("OAuth token exchange failed. Please try again.");
+        setScreen("setup");
+      })
+      .finally(() => setOauthProcessing(false));
+  }, []);
 
   const handleToken = (t: string) => {
     setToken(t);
     setScreen("dashboard");
   };
 
+  const handleMode = (m: AppMode) => {
+    setAppMode(m);
+  };
+
   const handleDisconnect = () => {
     LS.del(KEYS.token);
+    LS.del(KEYS.mode);
     setToken("");
+    setAppMode("analytics");
     setScreen("setup");
   };
 
@@ -5807,9 +6130,34 @@ export default function App() {
           },
         }}
       />
-      {screen === "setup" && <SetupScreen onToken={handleToken} />}
-      {screen === "dashboard" && token && (
-        <DashboardScreen token={token} onDisconnect={handleDisconnect} />
+      {oauthProcessing && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: "oklch(0.08 0.005 240)" }}
+        >
+          <div className="text-center space-y-3">
+            <Loader2
+              className="w-8 h-8 animate-spin mx-auto"
+              style={{ color: "oklch(0.65 0.2 145)" }}
+            />
+            <p className="text-sm font-medium text-foreground">
+              Completing login…
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Exchanging authorization code
+            </p>
+          </div>
+        </div>
+      )}
+      {!oauthProcessing && screen === "setup" && (
+        <SetupScreen onToken={handleToken} onMode={handleMode} />
+      )}
+      {!oauthProcessing && screen === "dashboard" && token && (
+        <DashboardScreen
+          token={token}
+          onDisconnect={handleDisconnect}
+          appMode={appMode}
+        />
       )}
     </>
   );
