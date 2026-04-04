@@ -3074,8 +3074,7 @@ interface LtpSidePanelProps {
   side: "CE" | "PE";
   strikePrice: number;
   token: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  backendActor?: any;
+  backendActorRef?: React.MutableRefObject<any>;
   onClose: () => void;
   analyticsMode?: boolean;
 }
@@ -3245,7 +3244,7 @@ function LtpSidePanel({
   side,
   strikePrice,
   token,
-  backendActor,
+  backendActorRef,
   onClose,
   analyticsMode,
 }: LtpSidePanelProps) {
@@ -3293,7 +3292,7 @@ function LtpSidePanel({
   }, []);
 
   // Live LTP + depth polling every 1 second
-  // biome-ignore lint/correctness/useExhaustiveDependencies: backendActor is a ref, intentional
+  // biome-ignore lint/correctness/useExhaustiveDependencies: backendActorRef is a ref, intentional
   useEffect(() => {
     if (!token || !instrumentKey) return;
     const encoded = encodeURIComponent(instrumentKey);
@@ -3367,9 +3366,12 @@ function LtpSidePanel({
         } | null = null;
 
         // Primary: backend proxy (bypasses CORS)
-        if (backendActor) {
+        if (backendActorRef?.current) {
           try {
-            const raw = await backendActor.getMarketDepth(encoded, token);
+            const raw = await backendActorRef.current.getMarketDepth(
+              encoded,
+              token,
+            );
             const d = JSON.parse(raw);
             depthParsed = parseDepthFromResponse(d);
           } catch {}
@@ -4830,7 +4832,7 @@ function OptionChainTab({
           side={sidePanel.side}
           strikePrice={sidePanel.strikePrice}
           token={token}
-          backendActor={backendActorRef.current}
+          backendActorRef={backendActorRef}
           onClose={() => setSidePanel(null)}
           analyticsMode={analyticsMode}
         />
