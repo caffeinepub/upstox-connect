@@ -869,7 +869,7 @@ function AppHeader({
             <button
               type="button"
               onClick={onMenuToggle}
-              className="lg:hidden w-7 h-7 flex items-center justify-center rounded text-muted-foreground hover:text-foreground"
+              className="w-7 h-7 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-secondary/60 transition-colors"
             >
               <Menu className="w-4 h-4" />
             </button>
@@ -1020,7 +1020,7 @@ function WatchlistPanel({
             <button
               type="button"
               onClick={onClose}
-              className="w-5 h-5 flex items-center justify-center rounded text-muted-foreground hover:text-foreground lg:hidden"
+              className="w-5 h-5 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-secondary/60 transition-colors"
             >
               <X className="w-3 h-3" />
             </button>
@@ -2546,11 +2546,7 @@ function TrendAnalysisPanel({
         : "bg-secondary text-muted-foreground border-border";
 
   return (
-    <div
-      data-ocid="options.trend_panel"
-      className="border-b border-border"
-      style={{ background: "oklch(0.10 0.012 250)" }}
-    >
+    <div data-ocid="options.trend_panel" className="border-b border-border">
       {/* Header with toggle */}
       <div className="flex items-center gap-2 px-3 py-2">
         <BarChart2 className="w-3.5 h-3.5 text-primary" />
@@ -4282,6 +4278,17 @@ function OptionChainTab({
         return chain.slice(start, end);
       })();
 
+  // PCR for option chain display
+  const chainTotalCE_OI = chain.reduce(
+    (s, r) => s + (r.call_options?.market_data?.oi ?? 0),
+    0,
+  );
+  const chainTotalPE_OI = chain.reduce(
+    (s, r) => s + (r.put_options?.market_data?.oi ?? 0),
+    0,
+  );
+  const chainPCR = chainTotalCE_OI > 0 ? chainTotalPE_OI / chainTotalCE_OI : 0;
+
   // Ref callback: scrolls ATM row into view whenever it is mounted/updated
   const atmRowRef = useCallback((node: HTMLTableRowElement | null) => {
     if (node) node.scrollIntoView({ block: "center", behavior: "smooth" });
@@ -4468,7 +4475,7 @@ function OptionChainTab({
                       >
                         {/* CE: VOL | IV | Vega | Γ | Θ | Δ | OI(chg) | OI(L) | LTP */}
                         <td
-                          className="py-1.5 px-2 text-right font-mono-data text-[9px]"
+                          className="py-1.5 px-2 text-right font-mono-data font-bold text-[9px]"
                           style={{ color: "oklch(0.64 0.2 145 / 0.7)" }}
                         >
                           {ce.volume
@@ -4476,7 +4483,7 @@ function OptionChainTab({
                             : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-1 text-right font-mono-data text-[9px]"
+                          className="py-1.5 px-1 text-right font-mono-data font-bold text-[9px]"
                           style={{ color: "oklch(0.64 0.2 145 / 0.6)" }}
                         >
                           {ceIk && greeksData[ceIk]?.iv != null
@@ -4487,7 +4494,7 @@ function OptionChainTab({
                             : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-1 text-right font-mono-data text-[9px]"
+                          className="py-1.5 px-1 text-right font-mono-data font-bold text-[9px]"
                           style={{ color: "oklch(0.64 0.2 145 / 0.5)" }}
                         >
                           {ceIk && greeksData[ceIk]?.vega != null
@@ -4495,7 +4502,7 @@ function OptionChainTab({
                             : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-1 text-right font-mono-data text-[9px]"
+                          className="py-1.5 px-1 text-right font-mono-data font-bold text-[9px]"
                           style={{ color: "oklch(0.64 0.2 145 / 0.5)" }}
                         >
                           {ceIk && greeksData[ceIk]?.gamma != null
@@ -4503,7 +4510,7 @@ function OptionChainTab({
                             : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-1 text-right font-mono-data text-[9px]"
+                          className="py-1.5 px-1 text-right font-mono-data font-bold text-[9px]"
                           style={{ color: "oklch(0.64 0.2 145 / 0.5)" }}
                         >
                           {ceIk && greeksData[ceIk]?.theta != null
@@ -4511,7 +4518,7 @@ function OptionChainTab({
                             : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-1 text-right font-mono-data text-[9px]"
+                          className="py-1.5 px-1 text-right font-mono-data font-bold text-[9px]"
                           style={{ color: "oklch(0.64 0.2 145 / 0.5)" }}
                         >
                           {ceIk && greeksData[ceIk]?.delta != null
@@ -4519,7 +4526,7 @@ function OptionChainTab({
                             : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-1 text-right font-mono-data text-[9px]"
+                          className="py-1.5 px-1 text-right font-mono-data font-bold text-[9px]"
                           style={{
                             color:
                               ceIk && (oiChangeData[ceIk]?.abs ?? 0) > 0
@@ -4542,14 +4549,14 @@ function OptionChainTab({
                             : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-2 text-right font-mono-data text-[9px]"
+                          className="py-1.5 px-2 text-right font-mono-data font-bold text-[9px]"
                           style={{ color: "oklch(0.64 0.2 145 / 0.7)" }}
                         >
                           {ce.oi ? `${(ce.oi / 100000).toFixed(2)}L` : "—"}
                         </td>
                         {/* biome-ignore lint/a11y/useKeyWithClickEvents: trading table cell */}
                         <td
-                          className="py-1.5 px-2 text-right font-mono-data text-foreground cursor-pointer hover:text-primary transition-colors"
+                          className="py-1.5 px-2 text-right font-mono-data font-bold text-foreground cursor-pointer hover:text-primary transition-colors"
                           onClick={() =>
                             ceIk &&
                             (ce.ltp ?? 0) > 0 &&
@@ -4573,11 +4580,16 @@ function OptionChainTab({
                             <span className="mr-1 text-atm text-[9px]">▶</span>
                           )}
                           {row.strike_price.toLocaleString("en-IN")}
+                          {isAtm && chainPCR > 0 && (
+                            <div className="text-[8px] font-bold mt-0.5 text-foreground/70 tabular-nums">
+                              PCR:{chainPCR.toFixed(2)}
+                            </div>
+                          )}
                         </td>
                         {/* PE: LTP | OI(L) | OI(chg) | Δ | Θ | Γ | Vega | IV | VOL */}
                         {/* biome-ignore lint/a11y/useKeyWithClickEvents: trading table cell */}
                         <td
-                          className="py-1.5 px-2 text-left font-mono-data text-foreground border-l border-border cursor-pointer hover:text-primary transition-colors"
+                          className="py-1.5 px-2 text-left font-mono-data font-bold text-foreground border-l border-border cursor-pointer hover:text-primary transition-colors"
                           onClick={() =>
                             peIk &&
                             (pe.ltp ?? 0) > 0 &&
@@ -4593,13 +4605,13 @@ function OptionChainTab({
                           {(pe.ltp ?? 0) > 0 ? (pe.ltp ?? 0).toFixed(2) : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-2 text-left font-mono-data text-[9px]"
+                          className="py-1.5 px-2 text-left font-mono-data font-bold text-[9px]"
                           style={{ color: "oklch(0.62 0.22 22 / 0.7)" }}
                         >
                           {pe.oi ? `${(pe.oi / 100000).toFixed(2)}L` : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-1 text-left font-mono-data text-[9px]"
+                          className="py-1.5 px-1 text-left font-mono-data font-bold text-[9px]"
                           style={{
                             color:
                               peIk && (oiChangeData[peIk]?.abs ?? 0) > 0
@@ -4622,7 +4634,7 @@ function OptionChainTab({
                             : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-1 text-left font-mono-data text-[9px]"
+                          className="py-1.5 px-1 text-left font-mono-data font-bold text-[9px]"
                           style={{ color: "oklch(0.62 0.22 22 / 0.5)" }}
                         >
                           {peIk && greeksData[peIk]?.delta != null
@@ -4630,7 +4642,7 @@ function OptionChainTab({
                             : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-1 text-left font-mono-data text-[9px]"
+                          className="py-1.5 px-1 text-left font-mono-data font-bold text-[9px]"
                           style={{ color: "oklch(0.62 0.22 22 / 0.5)" }}
                         >
                           {peIk && greeksData[peIk]?.theta != null
@@ -4638,7 +4650,7 @@ function OptionChainTab({
                             : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-1 text-left font-mono-data text-[9px]"
+                          className="py-1.5 px-1 text-left font-mono-data font-bold text-[9px]"
                           style={{ color: "oklch(0.62 0.22 22 / 0.5)" }}
                         >
                           {peIk && greeksData[peIk]?.gamma != null
@@ -4646,7 +4658,7 @@ function OptionChainTab({
                             : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-1 text-left font-mono-data text-[9px]"
+                          className="py-1.5 px-1 text-left font-mono-data font-bold text-[9px]"
                           style={{ color: "oklch(0.62 0.22 22 / 0.5)" }}
                         >
                           {peIk && greeksData[peIk]?.vega != null
@@ -4654,7 +4666,7 @@ function OptionChainTab({
                             : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-1 text-left font-mono-data text-[9px]"
+                          className="py-1.5 px-1 text-left font-mono-data font-bold text-[9px]"
                           style={{ color: "oklch(0.62 0.22 22 / 0.6)" }}
                         >
                           {peIk && greeksData[peIk]?.iv != null
@@ -4665,7 +4677,7 @@ function OptionChainTab({
                             : "—"}
                         </td>
                         <td
-                          className="py-1.5 px-2 text-left font-mono-data text-[9px]"
+                          className="py-1.5 px-2 text-left font-mono-data font-bold text-[9px]"
                           style={{ color: "oklch(0.62 0.22 22 / 0.7)" }}
                         >
                           {pe.volume
@@ -5344,7 +5356,7 @@ function DashboardScreen({
   const [loading, setLoading] = useState(true);
   const [corsWarning, setCorsWarning] = useState(false);
   const [activeTab, setActiveTab] = useState<TabValue>("overview");
-  const [watchlistOpen, setWatchlistOpen] = useState(false);
+  const [watchlistOpen, setWatchlistOpen] = useState(true);
   const { ticks: indexTicks, wsStatus, lastUpdated } = useIndexWebSocket(token);
   const { theme, toggle: toggleTheme } = useTheme();
   const [ctxMenu, setCtxMenu] = useState<{
@@ -5441,12 +5453,12 @@ function DashboardScreen({
 
       {/* Body: sidebar + main */}
       <div className="flex flex-1 overflow-hidden" data-ocid="main.section">
-        {/* Watchlist sidebar — desktop always visible, mobile overlay */}
+        {/* Watchlist sidebar — toggleable on all screens */}
         <div
           className={`
           absolute inset-y-0 left-0 z-30 lg:relative lg:flex lg:z-auto
           transition-transform duration-200
-          ${watchlistOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}
+          ${watchlistOpen ? "translate-x-0" : "-translate-x-full"}
         `}
           style={{ top: "44px" }}
         >
