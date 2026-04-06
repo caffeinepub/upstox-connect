@@ -188,6 +188,7 @@ interface Holding {
 
 interface OptionData {
   strike_price: number;
+  expiry?: string;
   lot_size?: number;
   call_options?: {
     instrument_key?: string;
@@ -618,6 +619,9 @@ interface GeneratedSignal {
   ceInstrumentKey?: string;
   peInstrumentKey?: string;
   status: "ACTIVE" | "TARGET1_HIT" | "TARGET2_HIT" | "SL_HIT" | "EXPIRED";
+  tgt1HitAt?: number;
+  tgt2HitAt?: number;
+  slHitAt?: number;
 }
 
 const DEFAULT_TRADE_SETTINGS: TradeSettings = {
@@ -3694,19 +3698,19 @@ function SignalMonitorPanel({
   const statusConfig = {
     ACTIVE: {
       label: "ACTIVE",
-      cls: "bg-amber-900/50 text-amber-300 border-amber-700/40",
+      cls: "bg-amber-100 text-amber-700 border-amber-400/60 dark:bg-amber-900/50 dark:text-amber-300 dark:border-amber-700/40",
     },
     TARGET1_HIT: {
       label: "TGT1 ✓",
-      cls: "bg-green-900/50 text-green-300 border-green-700/40",
+      cls: "bg-green-100 text-green-700 border-green-400/60 dark:bg-green-900/50 dark:text-green-300 dark:border-green-700/40",
     },
     TARGET2_HIT: {
       label: "TGT2 ✓✓",
-      cls: "bg-emerald-900/50 text-emerald-300 border-emerald-700/40",
+      cls: "bg-emerald-100 text-emerald-700 border-emerald-400/60 dark:bg-emerald-900/50 dark:text-emerald-300 dark:border-emerald-700/40",
     },
     SL_HIT: {
       label: "SL HIT",
-      cls: "bg-red-900/50 text-red-300 border-red-700/40",
+      cls: "bg-red-100 text-red-700 border-red-400/60 dark:bg-red-900/50 dark:text-red-300 dark:border-red-700/40",
     },
     EXPIRED: {
       label: "EXPIRED",
@@ -3715,10 +3719,7 @@ function SignalMonitorPanel({
   };
 
   return (
-    <div
-      className="border-b border-border"
-      style={{ background: "oklch(0.09 0.010 250)" }}
-    >
+    <div className="border-b border-border bg-white dark:bg-background">
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-2">
         <div
@@ -3827,12 +3828,12 @@ function SignalMonitorPanel({
                     key={sig.id}
                     className={`rounded-lg border p-2.5 ${
                       sig.status === "ACTIVE"
-                        ? "border-amber-800/40 bg-amber-950/10"
+                        ? "border-amber-400/60 bg-amber-50 dark:bg-amber-950/10 dark:border-amber-800/40"
                         : sig.status === "SL_HIT"
-                          ? "border-red-900/30 bg-red-950/10 opacity-70"
+                          ? "border-red-300/60 bg-red-50 dark:bg-red-950/10 dark:border-red-900/30 opacity-80"
                           : sig.status === "EXPIRED"
-                            ? "border-border/30 opacity-50"
-                            : "border-green-900/30 bg-green-950/10"
+                            ? "border-gray-200 dark:border-border/30 opacity-60 bg-gray-50 dark:bg-transparent"
+                            : "border-green-400/60 bg-green-50 dark:bg-green-950/10 dark:border-green-900/30"
                     }`}
                   >
                     {/* Row 1: action + instrument + status */}
@@ -3914,17 +3915,65 @@ function SignalMonitorPanel({
                         </span>
                       )}
                       <span className="text-[9px] text-foreground/60 ml-auto">
-                        {new Date(sig.timestamp).toLocaleTimeString("en-IN", {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}
-                        {" · "}
-                        {new Date(sig.timestamp).toLocaleDateString("en-IN", {
-                          day: "2-digit",
-                          month: "short",
-                        })}
+                        Generated:{" "}
+                        <span className="font-mono font-bold text-foreground/80">
+                          {new Date(sig.timestamp).toLocaleString("en-IN", {
+                            day: "2-digit",
+                            month: "short",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                            hour12: true,
+                          })}
+                        </span>
                       </span>
                     </div>
+                    {/* Hit timestamps row */}
+                    {(sig.tgt1HitAt || sig.tgt2HitAt || sig.slHitAt) && (
+                      <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1.5 pt-1.5 border-t border-border/30">
+                        {sig.tgt1HitAt && (
+                          <span className="text-[9px] text-green-600 dark:text-green-400 font-semibold">
+                            TGT1 hit:{" "}
+                            <span className="font-mono">
+                              {new Date(sig.tgt1HitAt).toLocaleString("en-IN", {
+                                day: "2-digit",
+                                month: "short",
+                                hour: "2-digit",
+                                minute: "2-digit",
+                                hour12: true,
+                              })}
+                            </span>
+                          </span>
+                        )}
+                        {sig.tgt2HitAt && (
+                          <span className="text-[9px] text-emerald-600 dark:text-emerald-400 font-semibold">
+                            TGT2 hit:{" "}
+                            <span className="font-mono">
+                              {new Date(sig.tgt2HitAt).toLocaleString("en-IN", {
+                                day: "2-digit",
+                                month: "short",
+                                hour: "2-digit",
+                                minute: "2-digit",
+                                hour12: true,
+                              })}
+                            </span>
+                          </span>
+                        )}
+                        {sig.slHitAt && (
+                          <span className="text-[9px] text-red-600 dark:text-red-400 font-semibold">
+                            SL hit:{" "}
+                            <span className="font-mono">
+                              {new Date(sig.slHitAt).toLocaleString("en-IN", {
+                                day: "2-digit",
+                                month: "short",
+                                hour: "2-digit",
+                                minute: "2-digit",
+                                hour12: true,
+                              })}
+                            </span>
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -4052,30 +4101,38 @@ function OptionChainTab({
     const now = Date.now();
     let changed = false;
     const updated = signals.map((sig) => {
-      if (sig.status !== "ACTIVE") return sig;
+      // Allow TARGET1_HIT signals to be checked for TGT2 progression
+      if (sig.status !== "ACTIVE" && sig.status !== "TARGET1_HIT") return sig;
       const expiryTs = new Date(sig.expiry).getTime();
       if (now > expiryTs + 24 * 60 * 60 * 1000) {
         changed = true;
         return { ...sig, status: "EXPIRED" as const };
       }
-      const row = chain.find((r) => r.strike_price === sig.strike);
+      // Match row by BOTH strike price AND expiry to prevent false hits from wrong expiry data
+      const row = chain.find(
+        (r) => r.strike_price === sig.strike && r.expiry === sig.expiry,
+      );
       if (!row) return sig;
       const currentLtp =
         sig.action === "BUY CALL"
           ? (row.call_options?.market_data?.ltp ?? 0)
           : (row.put_options?.market_data?.ltp ?? 0);
+      // Guard: only use LTP if it's a realistic value (not zero, not stale)
       if (currentLtp <= 0) return sig;
-      if (currentLtp >= sig.tgt2) {
+      const currentStatus = sig.status;
+      // Guard: only mark TGT2 if TGT1 was already hit (proper sequential progression)
+      if (currentLtp >= sig.tgt2 && currentStatus === "TARGET1_HIT") {
         changed = true;
-        return { ...sig, status: "TARGET2_HIT" as const };
+        return { ...sig, status: "TARGET2_HIT" as const, tgt2HitAt: now };
       }
-      if (currentLtp >= sig.tgt1) {
+      // Guard: only mark TGT1 if still ACTIVE
+      if (currentLtp >= sig.tgt1 && currentStatus === "ACTIVE") {
         changed = true;
-        return { ...sig, status: "TARGET1_HIT" as const };
+        return { ...sig, status: "TARGET1_HIT" as const, tgt1HitAt: now };
       }
-      if (currentLtp <= sig.sl) {
+      if (currentLtp <= sig.sl && currentStatus === "ACTIVE") {
         changed = true;
-        return { ...sig, status: "SL_HIT" as const };
+        return { ...sig, status: "SL_HIT" as const, slHitAt: now };
       }
       return sig;
     });
@@ -5356,7 +5413,7 @@ function DashboardScreen({
   const [loading, setLoading] = useState(true);
   const [corsWarning, setCorsWarning] = useState(false);
   const [activeTab, setActiveTab] = useState<TabValue>("overview");
-  const [watchlistOpen, setWatchlistOpen] = useState(true);
+  const [watchlistOpen, setWatchlistOpen] = useState(false);
   const { ticks: indexTicks, wsStatus, lastUpdated } = useIndexWebSocket(token);
   const { theme, toggle: toggleTheme } = useTheme();
   const [ctxMenu, setCtxMenu] = useState<{
