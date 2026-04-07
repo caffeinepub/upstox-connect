@@ -134,7 +134,6 @@ interface TickData {
   volume: number;
   change: number;
   prevClose: number;
-  open?: number;
   ts: number;
 }
 
@@ -257,55 +256,8 @@ async function upstoxFetch<T>(
     const json = await res.json();
     return { data: json.data ?? json, error: null };
   } catch (e: any) {
-    const msg = e.message ?? "Network error";
-    const isCorsOrNetwork =
-      msg === "Failed to fetch" ||
-      msg.includes("NetworkError") ||
-      msg.includes("CORS");
-    return { data: null, error: isCorsOrNetwork ? "CORS_BLOCKED" : msg };
+    return { data: null, error: e.message ?? "Network error" };
   }
-}
-
-// ─── Robust polling with backoff ─────────────────────────────────────────────
-function useRobustInterval(
-  callback: () => Promise<void>,
-  baseIntervalMs: number,
-  deps: React.DependencyList,
-) {
-  const backoffRef = useRef(baseIntervalMs);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isMountedRef = useRef(true);
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional robust polling
-  useEffect(() => {
-    isMountedRef.current = true;
-    backoffRef.current = baseIntervalMs;
-
-    const schedule = () => {
-      timerRef.current = setTimeout(async () => {
-        if (!isMountedRef.current) return;
-        if (document.hidden) {
-          backoffRef.current = baseIntervalMs;
-          schedule();
-          return;
-        }
-        try {
-          await callback();
-          backoffRef.current = baseIntervalMs;
-        } catch {
-          backoffRef.current = Math.min(backoffRef.current * 1.5, 10000);
-        }
-        if (isMountedRef.current) schedule();
-      }, backoffRef.current);
-    };
-
-    schedule();
-    return () => {
-      isMountedRef.current = false;
-      if (timerRef.current) clearTimeout(timerRef.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
 }
 
 // ─── Index WebSocket Hook ─────────────────────────────────────────────────────
@@ -383,7 +335,6 @@ function useIndexWebSocket(token: string) {
             volume: ff.marketLevel?.bidAskQuote?.[0]?.bidQ ?? 0,
             change: changePct,
             prevClose: cp > 0 ? cp : (next[key]?.prevClose ?? 0),
-            open: next[key]?.open ?? 0,
             ts: Date.now(),
           };
         }
@@ -491,7 +442,6 @@ function useIndexWebSocket(token: string) {
                   ltp,
                   change: changePct,
                   prevClose,
-                  open: val?.ohlc?.open ?? 0,
                   bid: 0,
                   ask: 0,
                   volume: 0,
@@ -506,23 +456,9 @@ function useIndexWebSocket(token: string) {
       } catch {}
     };
     poll();
-    const id = setInterval(() => {
-      if (!document.hidden) poll();
-    }, 2000);
+    const id = setInterval(poll, 1000);
     return () => clearInterval(id);
   }, [token]);
-
-  // Resume WebSocket on page visibility change (fixes stale data after tab switch)
-  useEffect(() => {
-    const handleVisibilityChange = () => {
-      if (!document.hidden && wsStatus !== "connected" && token) {
-        connect();
-      }
-    };
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () =>
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, [wsStatus, token, connect]);
 
   return { ticks, wsStatus, lastUpdated };
 }
@@ -576,6 +512,7 @@ function IndexChip({
   wsStatus: WsStatus;
   onContextMenu?: (e: React.MouseEvent) => void;
 }) {
+  const pos = (tick?.change ?? 0) >= 0;
   const isStale = wsStatus !== "connected" && !!tick;
   const isVix = label === "VIX";
   const vixColor =
@@ -626,30 +563,22 @@ function IndexChip({
           <span className="text-[8px] text-amber-400/70">●</span>
         )}
       </div>
-      {/* Row 2: Running intraday change vs Prev Close (LTP - prevClose) */}
-      {tick &&
-        tick.prevClose > 0 &&
-        (() => {
-          const prevCloseVal = tick.prevClose;
-          const diff = tick.ltp - prevCloseVal;
-          const pct = (diff / prevCloseVal) * 100;
-          const isPos = diff >= 0;
-          return (
-            <div className="flex items-center gap-1 mt-0.5">
-              <span
-                className={`text-[11px] font-bold px-1.5 py-0.5 rounded tabular-nums font-mono-data ${
-                  isPos
-                    ? "bg-green-950 text-gain border border-green-800/40"
-                    : "bg-red-950 text-loss border border-red-800/40"
-                } ${isStale ? "opacity-60" : ""}`}
-              >
-                {isPos ? "+" : ""}
-                {diff.toFixed(2)} ({isPos ? "+" : ""}
-                {pct.toFixed(2)}%)
-              </span>
-            </div>
-          );
-        })()}
+      {/* Row 2: Change badge (-476.80 (-2.06%)) */}
+      {tick && (
+        <div className="flex items-center gap-1">
+          <span
+            className={`text-[10px] font-bold px-1.5 py-0.5 rounded tabular-nums font-mono-data ${
+              pos
+                ? "bg-green-950 text-gain border border-green-800/40"
+                : "bg-red-950 text-loss border border-red-800/40"
+            } ${isStale ? "opacity-60" : ""}`}
+          >
+            {pos ? "+" : ""}
+            {(tick.ltp - (tick.prevClose ?? 0)).toFixed(2)} ({pos ? "+" : ""}
+            {tick.change.toFixed(2)}%)
+          </span>
+        </div>
+      )}
       {tick && (
         <span className="text-[9px] text-muted-foreground/50 font-mono-data leading-none">
           {getTimeAgo(tick.ts)}
@@ -1253,15 +1182,9 @@ function PositionsTab({
     isInitialPositionsLoad.current = true;
     fetchPositions(false);
     isInitialPositionsLoad.current = false;
+    const id = setInterval(() => fetchPositions(true), 1000);
+    return () => clearInterval(id);
   }, [fetchPositions]);
-
-  useRobustInterval(
-    async () => {
-      await fetchPositions(true);
-    },
-    2000,
-    [fetchPositions],
-  );
 
   const totalPnl = positions.reduce((sum, p) => sum + (p.pnl ?? 0), 0);
 
@@ -1492,15 +1415,9 @@ function HoldingsTab({
 
   useEffect(() => {
     fetchHoldings(false);
+    const id = setInterval(() => fetchHoldings(true), 1000);
+    return () => clearInterval(id);
   }, [fetchHoldings]);
-
-  useRobustInterval(
-    async () => {
-      await fetchHoldings(true);
-    },
-    2000,
-    [fetchHoldings],
-  );
 
   const totalInvested = holdings.reduce(
     (s, h) => s + h.average_price * h.quantity,
@@ -2452,24 +2369,12 @@ function TrendAnalysisPanel({
   const atmIV = greeksData?.[atmCeKey]?.iv ?? null;
   const atmPeIV = greeksData?.[atmPeKey]?.iv ?? null;
 
-  // ── Market hours gate (signals only after 9:15 AM IST) ──────────────────
-  const isMarketHours = (() => {
-    const now = new Date();
-    const istOffset = 5 * 60 + 30; // UTC+5:30 in minutes
-    const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
-    const istMinutes = (utcMinutes + istOffset) % (24 * 60);
-    const marketOpen = 9 * 60 + 15; // 9:15 AM IST
-    const marketClose = 15 * 60 + 30; // 3:30 PM IST
-    return istMinutes >= marketOpen && istMinutes <= marketClose;
-  })();
-
   // ── High-conviction signal gate ───────────────────────────────────────────
   // Relaxed: MEDIUM+ confidence, 4+ same-direction signals, IV < 80 (allow high-vol env)
   const dominantSignals =
     trend === "BULLISH" ? bullSignals : trend === "BEARISH" ? bearSignals : 0;
   const isHighConviction =
     chain.length > 0 &&
-    isMarketHours &&
     (confidence === "HIGH" || confidence === "MEDIUM") &&
     trend !== "NEUTRAL" &&
     dominantSignals >= 4 &&
@@ -2671,13 +2576,6 @@ function TrendAnalysisPanel({
       </div>
       {expanded && (
         <div className="p-3">
-          {/* Market hours indicator */}
-          {!isMarketHours && (
-            <div className="text-[10px] text-amber-400 font-semibold px-3 py-1.5 mb-2 bg-amber-950/20 rounded border border-amber-800/40 flex items-center gap-1.5">
-              <span>⏰</span>
-              <span>Signals paused — market opens 9:15 AM IST</span>
-            </div>
-          )}
           {/* Main recommendation card */}
           <div
             data-ocid="options.ai.card"
@@ -3916,10 +3814,7 @@ function SignalMonitorPanel({
                 const actionCls = isCall
                   ? "bg-green-950/50 border-green-800/40 text-green-300"
                   : "bg-red-950/50 border-red-800/40 text-red-300";
-                const row = chain.find(
-                  (r) =>
-                    r.strike_price === sig.strike && r.expiry === sig.expiry,
-                );
+                const row = chain.find((r) => r.strike_price === sig.strike);
                 const currentLtp = isCall
                   ? (row?.call_options?.market_data?.ltp ?? 0)
                   : (row?.put_options?.market_data?.ltp ?? 0);
@@ -4003,16 +3898,12 @@ function SignalMonitorPanel({
 
                     {/* Row 3: live LTP + P&L + timestamp */}
                     <div className="flex items-center gap-3">
-                      {currentLtp > 0 ? (
+                      {currentLtp > 0 && (
                         <span className="text-[9px] text-foreground/70">
                           Live:{" "}
                           <span className="font-mono text-foreground font-bold">
                             ₹{currentLtp.toFixed(2)}
                           </span>
-                        </span>
-                      ) : (
-                        <span className="text-[9px] text-muted-foreground/50">
-                          Live: — (load {sig.expiry} expiry to see)
                         </span>
                       )}
                       {pnl !== null && sig.status === "ACTIVE" && (
@@ -4378,14 +4269,15 @@ function OptionChainTab({
     }
   }, [expiry]);
 
-  // Auto-refresh option chain LTP with robust backoff
-  useRobustInterval(
-    async () => {
-      await fetchChain(true);
-    },
-    1500,
-    [expiry],
-  );
+  // Auto-refresh option chain LTP every 1 second
+  // biome-ignore lint/correctness/useExhaustiveDependencies: fetchChain is stable, intentional
+  useEffect(() => {
+    if (!expiry) return;
+    const id = setInterval(() => {
+      fetchChain(true);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [expiry]);
 
   const underlyingLtp = indexTicks[underlying]?.ltp ?? 0;
   const atm = chain.reduce<OptionData | null>((best, row) => {
@@ -5559,10 +5451,7 @@ function DashboardScreen({
         broker: d.broker ?? "Upstox",
         userId: d.user_id ?? "—",
       });
-    } else if (
-      profileRes.error === "CORS_BLOCKED" ||
-      fundsRes.error === "CORS_BLOCKED"
-    ) {
+    } else if (profileRes.error) {
       setCorsWarning(true);
     }
 
@@ -5608,36 +5497,14 @@ function DashboardScreen({
 
       {/* CORS warning */}
       {corsWarning && (
-        <div className="mx-3 my-2 p-3 rounded border border-amber-800/40 bg-amber-950/20 text-amber-200 text-[11px]">
-          <div className="flex items-start gap-2">
-            <span className="text-amber-400 font-bold">⚠</span>
-            <div className="space-y-1">
-              <p className="font-bold">API Connection Issue</p>
-              <p className="text-amber-200/80">
-                If you see CORS errors: your browser is blocking direct API
-                calls. This is normal when using the deployed app URL.
-              </p>
-              <p className="text-amber-200/80">
-                <strong>Fix:</strong> In Upstox Developer Console → add this URL
-                as a Redirect URI:{" "}
-                <span className="font-mono bg-amber-900/40 px-1 rounded">
-                  {window.location.origin}
-                </span>
-              </p>
-              <p className="text-amber-200/60 text-[10px]">
-                Or use the local dev server at{" "}
-                <span className="font-mono">http://localhost:5173</span> which
-                is already registered.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setCorsWarning(false)}
-              className="ml-auto text-amber-400/60 hover:text-amber-400"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
+        <div
+          className="px-3 py-1.5 border-b border-amber-800/30"
+          style={{ background: "oklch(0.72 0.18 75 / 0.08)" }}
+        >
+          <p className="text-[10px] text-amber-400">
+            ⚠️ API blocked by CORS — enable CORS proxy or test from registered
+            redirect URI
+          </p>
         </div>
       )}
 
