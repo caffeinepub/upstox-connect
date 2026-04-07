@@ -626,37 +626,30 @@ function IndexChip({
           <span className="text-[8px] text-amber-400/70">●</span>
         )}
       </div>
-      {/* Row 2: Change badge (open - prevClose = opening gap) */}
-      {tick && tick.prevClose > 0 && (
-        <div className="flex flex-col gap-0.5">
-          <span className="text-[9px] text-muted-foreground/60 font-semibold">
-            {(tick.open ?? 0) > 0 ? "Open vs Prev Close" : "vs Prev Close"}
-          </span>
-          <div className="flex items-center gap-1">
-            {(() => {
-              const openVal = tick.open ?? 0;
-              const prevCloseVal = tick.prevClose ?? 0;
-              const compareVal = openVal > 0 ? openVal : tick.ltp;
-              const diff = compareVal - prevCloseVal;
-              const pct = prevCloseVal > 0 ? (diff / prevCloseVal) * 100 : 0;
-              const isPos = diff >= 0;
-              return (
-                <span
-                  className={`text-[10px] font-bold px-1.5 py-0.5 rounded tabular-nums font-mono-data ${
-                    isPos
-                      ? "bg-green-950 text-gain border border-green-800/40"
-                      : "bg-red-950 text-loss border border-red-800/40"
-                  } ${isStale ? "opacity-60" : ""}`}
-                >
-                  {isPos ? "+" : ""}
-                  {diff.toFixed(2)} ({isPos ? "+" : ""}
-                  {pct.toFixed(2)}%)
-                </span>
-              );
-            })()}
-          </div>
-        </div>
-      )}
+      {/* Row 2: Running intraday change vs Prev Close (LTP - prevClose) */}
+      {tick &&
+        tick.prevClose > 0 &&
+        (() => {
+          const prevCloseVal = tick.prevClose;
+          const diff = tick.ltp - prevCloseVal;
+          const pct = (diff / prevCloseVal) * 100;
+          const isPos = diff >= 0;
+          return (
+            <div className="flex items-center gap-1 mt-0.5">
+              <span
+                className={`text-[11px] font-bold px-1.5 py-0.5 rounded tabular-nums font-mono-data ${
+                  isPos
+                    ? "bg-green-950 text-gain border border-green-800/40"
+                    : "bg-red-950 text-loss border border-red-800/40"
+                } ${isStale ? "opacity-60" : ""}`}
+              >
+                {isPos ? "+" : ""}
+                {diff.toFixed(2)} ({isPos ? "+" : ""}
+                {pct.toFixed(2)}%)
+              </span>
+            </div>
+          );
+        })()}
       {tick && (
         <span className="text-[9px] text-muted-foreground/50 font-mono-data leading-none">
           {getTimeAgo(tick.ts)}
