@@ -1,4 +1,4 @@
-import OutCall "http-outcalls/outcall";
+import OutCall "mo:caffeineai-http-outcalls/outcall";
 import Text "mo:core/Text";
 import List "mo:core/List";
 

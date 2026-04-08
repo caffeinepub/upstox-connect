@@ -28,6 +28,7 @@ export const TransformationOutput = IDL.Record({
 });
 
 export const idlService = IDL.Service({
+  'getMarketDepth' : IDL.Func([IDL.Text, IDL.Text], [IDL.Text], []),
   'getOptionGreeks' : IDL.Func([IDL.Text, IDL.Text], [IDL.Text], []),
   'transform' : IDL.Func(
       [TransformationInput],
@@ -56,6 +57,7 @@ export const idlFactory = ({ IDL }) => {
   });
   
   return IDL.Service({
+    'getMarketDepth' : IDL.Func([IDL.Text, IDL.Text], [IDL.Text], []),
     'getOptionGreeks' : IDL.Func([IDL.Text, IDL.Text], [IDL.Text], []),
     'transform' : IDL.Func(
         [TransformationInput],

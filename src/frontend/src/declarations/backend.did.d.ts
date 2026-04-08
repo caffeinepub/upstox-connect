@@ -26,6 +26,7 @@ export interface http_request_result {
   'headers' : Array<http_header>,
 }
 export interface _SERVICE {
+  'getMarketDepth' : ActorMethod<[string, string], string>,
   'getOptionGreeks' : ActorMethod<[string, string], string>,
   'transform' : ActorMethod<[TransformationInput], TransformationOutput>,
 }

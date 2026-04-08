@@ -108,11 +108,26 @@ export interface http_request_result {
     headers: Array<http_header>;
 }
 export interface backendInterface {
+    getMarketDepth(instrumentKey: string, apiKey: string): Promise<string>;
     getOptionGreeks(instrumentKeys: string, apiKey: string): Promise<string>;
     transform(input: TransformationInput): Promise<TransformationOutput>;
 }
 export class Backend implements backendInterface {
     constructor(private actor: ActorSubclass<_SERVICE>, private _uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, private _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, private processError?: (error: unknown) => never){}
+    async getMarketDepth(arg0: string, arg1: string): Promise<string> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.getMarketDepth(arg0, arg1);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.getMarketDepth(arg0, arg1);
+            return result;
+        }
+    }
     async getOptionGreeks(arg0: string, arg1: string): Promise<string> {
         if (this.processError) {
             try {

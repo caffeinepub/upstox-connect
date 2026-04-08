@@ -388,7 +388,8 @@ function useIndexWebSocket(token: string) {
     ws.onerror = () => setWsStatus("error");
     ws.onclose = () => {
       setWsStatus("disconnected");
-      retryRef.current = setTimeout(() => connect(), 5000);
+      // Auto-reconnect after 2 seconds
+      retryRef.current = setTimeout(() => connect(), 2000);
     };
     wsRef.current = ws;
   }, [token, processTick]);
@@ -401,10 +402,15 @@ function useIndexWebSocket(token: string) {
     };
   }, [token, connect]);
 
-  // REST polling fallback every 1s when WS is not connected
+  // REST polling fallback every 1s — always runs to keep prevClose fresh
   useEffect(() => {
     if (!token) return;
+    const isFetchingRef = { current: false };
+    const lastSuccessRef = { current: Date.now() };
+
     const poll = async () => {
+      if (isFetchingRef.current) return;
+      isFetchingRef.current = true;
       try {
         const keys = INDEX_KEYS.join(",");
         const res = await fetch(
@@ -426,6 +432,7 @@ function useIndexWebSocket(token: string) {
               const key = rawKey.replace(":", "|");
               const ltp = val?.last_price ?? 0;
               if (ltp > 0) {
+                // Always prefer API prevClose; ohlc.close is yesterday's close
                 const apiPrevClose =
                   val?.prev_close_price ??
                   val?.previous_close ??
@@ -449,15 +456,37 @@ function useIndexWebSocket(token: string) {
                 };
               }
             }
+            try {
+              localStorage.setItem(TICKS_CACHE_KEY, JSON.stringify(next));
+            } catch {}
             return next;
           });
           setLastUpdated(new Date());
+          lastSuccessRef.current = Date.now();
         }
-      } catch {}
+      } catch {
+      } finally {
+        isFetchingRef.current = false;
+      }
     };
+
     poll();
     const id = setInterval(poll, 1000);
-    return () => clearInterval(id);
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastSuccessRef.current > 10000) {
+        isFetchingRef.current = false;
+        poll();
+      }
+    }, 5000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") poll();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(id);
+      clearInterval(watchdog);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [token]);
 
   return { ticks, wsStatus, lastUpdated };
@@ -512,7 +541,6 @@ function IndexChip({
   wsStatus: WsStatus;
   onContextMenu?: (e: React.MouseEvent) => void;
 }) {
-  const pos = (tick?.change ?? 0) >= 0;
   const isStale = wsStatus !== "connected" && !!tick;
   const isVix = label === "VIX";
   const vixColor =
@@ -523,6 +551,15 @@ function IndexChip({
           ? "text-amber-400"
           : "text-loss"
       : "";
+
+  // Row 2: running intraday change vs Prev Close
+  const prevClose = tick?.prevClose ?? 0;
+  const hasValidPrevClose = prevClose > 0 && tick && tick.ltp > 0;
+  const intradayChange = hasValidPrevClose ? tick.ltp - prevClose : 0;
+  const intradayChangePct = hasValidPrevClose
+    ? (intradayChange / prevClose) * 100
+    : 0;
+  const pos = intradayChange >= 0;
 
   const getTimeAgo = (ts: number) => {
     const secs = Math.floor((Date.now() - ts) / 1000);
@@ -563,9 +600,9 @@ function IndexChip({
           <span className="text-[8px] text-amber-400/70">●</span>
         )}
       </div>
-      {/* Row 2: Change badge (-476.80 (-2.06%)) */}
-      {tick && (
-        <div className="flex items-center gap-1">
+      {/* Row 2: Running intraday change vs Prev Close: ±amount (±%) */}
+      <div className="flex items-center gap-1">
+        {hasValidPrevClose ? (
           <span
             className={`text-[10px] font-bold px-1.5 py-0.5 rounded tabular-nums font-mono-data ${
               pos
@@ -574,11 +611,15 @@ function IndexChip({
             } ${isStale ? "opacity-60" : ""}`}
           >
             {pos ? "+" : ""}
-            {(tick.ltp - (tick.prevClose ?? 0)).toFixed(2)} ({pos ? "+" : ""}
-            {tick.change.toFixed(2)}%)
+            {intradayChange.toFixed(2)} ({pos ? "+" : ""}
+            {intradayChangePct.toFixed(2)}%)
           </span>
-        </div>
-      )}
+        ) : tick ? (
+          <span className="text-[10px] text-muted-foreground/50 font-mono-data px-1">
+            —
+          </span>
+        ) : null}
+      </div>
       {tick && (
         <span className="text-[9px] text-muted-foreground/50 font-mono-data leading-none">
           {getTimeAgo(tick.ts)}
@@ -1182,8 +1223,35 @@ function PositionsTab({
     isInitialPositionsLoad.current = true;
     fetchPositions(false);
     isInitialPositionsLoad.current = false;
-    const id = setInterval(() => fetchPositions(true), 1000);
-    return () => clearInterval(id);
+    // Watchdog pattern: skip if already fetching, watchdog resets stale flag
+    const isFetchingRef = { current: false };
+    const lastSuccessRef = { current: Date.now() };
+    const doFetch = async () => {
+      if (isFetchingRef.current) return;
+      isFetchingRef.current = true;
+      try {
+        await fetchPositions(true);
+        lastSuccessRef.current = Date.now();
+      } finally {
+        isFetchingRef.current = false;
+      }
+    };
+    const id = setInterval(doFetch, 1000);
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastSuccessRef.current > 10000) {
+        isFetchingRef.current = false;
+        doFetch();
+      }
+    }, 5000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") doFetch();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(id);
+      clearInterval(watchdog);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [fetchPositions]);
 
   const totalPnl = positions.reduce((sum, p) => sum + (p.pnl ?? 0), 0);
@@ -1415,8 +1483,34 @@ function HoldingsTab({
 
   useEffect(() => {
     fetchHoldings(false);
-    const id = setInterval(() => fetchHoldings(true), 1000);
-    return () => clearInterval(id);
+    const isFetchingRef = { current: false };
+    const lastSuccessRef = { current: Date.now() };
+    const doFetch = async () => {
+      if (isFetchingRef.current) return;
+      isFetchingRef.current = true;
+      try {
+        await fetchHoldings(true);
+        lastSuccessRef.current = Date.now();
+      } finally {
+        isFetchingRef.current = false;
+      }
+    };
+    const id = setInterval(doFetch, 1000);
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastSuccessRef.current > 10000) {
+        isFetchingRef.current = false;
+        doFetch();
+      }
+    }, 5000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") doFetch();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(id);
+      clearInterval(watchdog);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [fetchHoldings]);
 
   const totalInvested = holdings.reduce(
@@ -3985,6 +4079,150 @@ function SignalMonitorPanel({
   );
 }
 
+// ─── Signal Alert Popup ────────────────────────────────────────────────────────
+function playSignalChime() {
+  try {
+    const ctx = new (
+      window.AudioContext || (window as any).webkitAudioContext
+    )();
+    const tones = [440, 660, 880];
+    tones.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0, ctx.currentTime + i * 0.22);
+      gain.gain.linearRampToValueAtTime(
+        0.18,
+        ctx.currentTime + i * 0.22 + 0.05,
+      );
+      gain.gain.linearRampToValueAtTime(0, ctx.currentTime + i * 0.22 + 0.2);
+      osc.start(ctx.currentTime + i * 0.22);
+      osc.stop(ctx.currentTime + i * 0.22 + 0.22);
+    });
+  } catch {}
+}
+
+function SignalAlertPopup({
+  signal,
+  onDismiss,
+}: {
+  signal: GeneratedSignal;
+  onDismiss: () => void;
+}) {
+  const isCall = signal.action === "BUY CALL";
+  const bgStyle = isCall
+    ? {
+        background: "oklch(0.20 0.08 145)",
+        border: "1.5px solid oklch(0.45 0.18 145)",
+      }
+    : {
+        background: "oklch(0.18 0.07 22)",
+        border: "1.5px solid oklch(0.50 0.20 22)",
+      };
+
+  const timeStr = new Date(signal.timestamp).toLocaleTimeString("en-IN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  });
+
+  return (
+    <div
+      data-ocid="signal_alert.popup"
+      style={{
+        position: "fixed",
+        top: "80px",
+        right: "16px",
+        zIndex: 9999,
+        width: "260px",
+        borderRadius: "10px",
+        padding: "12px 14px",
+        boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+        animation: "slideInFromRight 0.3s ease-out",
+        ...bgStyle,
+      }}
+      onMouseEnter={onDismiss}
+    >
+      <style>{`
+        @keyframes slideInFromRight {
+          from { transform: translateX(110%); opacity: 0; }
+          to { transform: translateX(0); opacity: 1; }
+        }
+      `}</style>
+      {/* Header */}
+      <div className="flex items-center justify-between mb-2">
+        <span
+          className="text-sm font-black tracking-tight"
+          style={{
+            color: isCall ? "oklch(0.75 0.22 145)" : "oklch(0.75 0.22 22)",
+          }}
+        >
+          {isCall ? "🟢 BUY CALL" : "🔴 BUY PUT"}
+        </span>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-foreground/50 hover:text-foreground transition-colors"
+          aria-label="Dismiss alert"
+        >
+          <X className="w-3.5 h-3.5" />
+        </button>
+      </div>
+      {/* Strike info */}
+      <div className="mb-2">
+        <span className="font-mono-data font-bold text-foreground text-base">
+          {signal.instrument} {signal.strike.toLocaleString("en-IN")}{" "}
+          {isCall ? "CE" : "PE"}
+        </span>
+        <span className="ml-2 text-[10px] text-foreground/60">
+          {signal.expiry}
+        </span>
+      </div>
+      {/* Trade levels */}
+      <div className="grid grid-cols-4 gap-1 mb-2">
+        {[
+          {
+            label: "Entry",
+            value: signal.entryPrice.toFixed(2),
+            cls: "text-blue-300",
+          },
+          { label: "SL", value: signal.sl.toFixed(2), cls: "text-red-400" },
+          {
+            label: "TGT1",
+            value: signal.tgt1.toFixed(2),
+            cls: "text-green-400",
+          },
+          {
+            label: "TGT2",
+            value: signal.tgt2.toFixed(2),
+            cls: "text-emerald-300",
+          },
+        ].map(({ label, value, cls }) => (
+          <div key={label} className="text-center">
+            <div className="text-[8px] text-foreground/60 font-bold uppercase tracking-wider">
+              {label}
+            </div>
+            <div className={`font-mono-data text-[10px] font-bold ${cls}`}>
+              ₹{value}
+            </div>
+          </div>
+        ))}
+      </div>
+      {/* Footer */}
+      <div className="flex items-center justify-between">
+        <span className="text-[9px] text-foreground/50">{timeStr}</span>
+        <span className="text-[9px] text-foreground/40 italic">
+          hover to dismiss
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function OptionChainTab({
   token,
   indexTicks,
@@ -4023,6 +4261,8 @@ function OptionChainTab({
 
   const [signals, setSignals] = useState<GeneratedSignal[]>(loadSignals);
   const [signalMonitorExpanded, setSignalMonitorExpanded] = useState(true);
+  const [alertSignal, setAlertSignal] = useState<GeneratedSignal | null>(null);
+  const lastAlertedSignalIdRef = useRef<string | null>(null);
   const pendingSignalRef = useRef<{
     key: string;
     count: number;
@@ -4065,6 +4305,18 @@ function OptionChainTab({
       const updated = [newSignal, ...existing].slice(0, 30);
       localStorage.setItem("upstox_signals_v1", JSON.stringify(updated));
       setSignals(updated);
+      // Trigger popup alert + sound for new BUY CALL / BUY PUT signals
+      if (lastAlertedSignalIdRef.current !== newSignal.id) {
+        lastAlertedSignalIdRef.current = newSignal.id;
+        setAlertSignal(newSignal);
+        playSignalChime();
+        // Auto-dismiss after 30 seconds
+        setTimeout(
+          () =>
+            setAlertSignal((prev) => (prev?.id === newSignal.id ? null : prev)),
+          30000,
+        );
+      }
     },
     [underlying],
   );
@@ -4269,14 +4521,38 @@ function OptionChainTab({
     }
   }, [expiry]);
 
-  // Auto-refresh option chain LTP every 1 second
+  // Auto-refresh option chain LTP every 1 second with watchdog
   // biome-ignore lint/correctness/useExhaustiveDependencies: fetchChain is stable, intentional
   useEffect(() => {
     if (!expiry) return;
-    const id = setInterval(() => {
-      fetchChain(true);
-    }, 1000);
-    return () => clearInterval(id);
+    const isFetchingRef = { current: false };
+    const lastSuccessRef = { current: Date.now() };
+    const doFetch = async () => {
+      if (isFetchingRef.current) return;
+      isFetchingRef.current = true;
+      try {
+        await fetchChain(true);
+        lastSuccessRef.current = Date.now();
+      } finally {
+        isFetchingRef.current = false;
+      }
+    };
+    const id = setInterval(doFetch, 1000);
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastSuccessRef.current > 10000) {
+        isFetchingRef.current = false;
+        doFetch();
+      }
+    }, 5000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") doFetch();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(id);
+      clearInterval(watchdog);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [expiry]);
 
   const underlyingLtp = indexTicks[underlying]?.ltp ?? 0;
@@ -4772,6 +5048,13 @@ function OptionChainTab({
           backendActorRef={backendActorRef}
           onClose={() => setSidePanel(null)}
           analyticsMode={analyticsMode}
+        />
+      )}
+      {/* Signal Alert Popup */}
+      {alertSignal && (
+        <SignalAlertPopup
+          signal={alertSignal}
+          onDismiss={() => setAlertSignal(null)}
         />
       )}
     </div>

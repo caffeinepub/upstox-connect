@@ -1,0 +1,27 @@
+type http_request_result = 
+ record {
+   body: blob;
+   headers: vec http_header;
+   status: nat;
+ };
+type http_header = 
+ record {
+   name: text;
+   value: text;
+ };
+type TransformationOutput = 
+ record {
+   body: blob;
+   headers: vec http_header;
+   status: nat;
+ };
+type TransformationInput = 
+ record {
+   context: blob;
+   response: http_request_result;
+ };
+service : {
+  getMarketDepth: (instrumentKey: text, apiKey: text) -> (text);
+  getOptionGreeks: (instrumentKeys: text, apiKey: text) -> (text);
+  transform: (input: TransformationInput) -> (TransformationOutput) query;
+}
