@@ -283,10 +283,13 @@ function useIndexWebSocket(token: string) {
       const cached = localStorage.getItem(TICKS_CACHE_KEY);
       if (cached) {
         const parsed = JSON.parse(cached);
-        // Ensure ts is set on all cached ticks
         const now = Date.now();
         for (const key of Object.keys(parsed)) {
           if (!parsed[key].ts) parsed[key].ts = now;
+          // FIX 4: Don't use stale prevClose=0 from cache — force fresh OHLC fetch
+          if (!(parsed[key].prevClose > 0)) {
+            parsed[key].prevClose = 0;
+          }
         }
         return parsed;
       }
@@ -321,20 +324,32 @@ function useIndexWebSocket(token: string) {
       for (const [key, feed] of Object.entries<any>(raw.feeds)) {
         const ff =
           (feed as any)?.ff?.marketFF ?? (feed as any)?.ff?.indexFF ?? {};
+        // FIX 3: cp lives inside ltpc object specifically — extract from there
         const ltpData = ff.ltpc ?? {};
         const ltp = ltpData.ltp ?? ltpData.close_price ?? next[key]?.ltp ?? 0;
         if (ltp > 0) {
-          const cp = ltpData.cp ?? next[key]?.prevClose ?? 0;
+          // FIX 3: Only use WebSocket cp if it's a valid positive number
+          // Never overwrite an existing valid prevClose with 0/missing value
+          const wscp =
+            typeof ltpData.cp === "number" && ltpData.cp > 0
+              ? ltpData.cp
+              : null;
+          const prevClose = wscp ?? next[key]?.prevClose ?? 0;
           const changePct =
-            cp > 0 ? ((ltp - cp) / cp) * 100 : (next[key]?.change ?? 0);
+            prevClose > 0
+              ? ((ltp - prevClose) / prevClose) * 100
+              : (next[key]?.change ?? 0);
           next[key] = {
             key,
             ltp,
-            bid: 0,
-            ask: 0,
-            volume: ff.marketLevel?.bidAskQuote?.[0]?.bidQ ?? 0,
+            bid:
+              ff.marketLevel?.bidAskQuote?.[0]?.bidPrice ?? next[key]?.bid ?? 0,
+            ask:
+              ff.marketLevel?.bidAskQuote?.[0]?.askPrice ?? next[key]?.ask ?? 0,
+            volume:
+              ff.marketLevel?.bidAskQuote?.[0]?.bidQ ?? next[key]?.volume ?? 0,
             change: changePct,
-            prevClose: cp > 0 ? cp : (next[key]?.prevClose ?? 0),
+            prevClose,
             ts: Date.now(),
           };
         }
@@ -407,11 +422,13 @@ function useIndexWebSocket(token: string) {
     if (!token) return;
     const isFetchingRef = { current: false };
     const lastSuccessRef = { current: Date.now() };
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
     const poll = async () => {
       if (isFetchingRef.current) return;
       isFetchingRef.current = true;
       try {
+        // FIX 6: Include all 4 index keys, use comma-joined encoding
         const keys = INDEX_KEYS.join(",");
         const res = await fetch(
           `https://api.upstox.com/v2/market-quote/ohlc?instrument_key=${encodeURIComponent(keys)}&interval=1d`,
@@ -422,37 +439,79 @@ function useIndexWebSocket(token: string) {
             },
           },
         );
-        if (!res.ok) return;
+        // FIX 2: Log non-OK responses instead of silently returning
+        if (!res.ok) {
+          console.warn(`[IndexBar] OHLC fetch failed: HTTP ${res.status}`);
+          retryTimer = setTimeout(poll, 2000);
+          return;
+        }
         const json = await res.json();
         if (json?.data) {
           setTicks((prev) => {
             const next = { ...prev };
             const now = Date.now();
             for (const [rawKey, val] of Object.entries<any>(json.data)) {
+              // FIX 6: Per-key null safety — skip malformed entries
+              if (!val || typeof val !== "object") continue;
+              // Upstox OHLC returns keys with colon: "NSE_INDEX:Nifty 50"
+              // Normalize to pipe format used in INDEX_KEYS
               const key = rawKey.replace(":", "|");
               const ltp = val?.last_price ?? 0;
+
+              // FIX 1: Try ALL prevClose fields, ohlc.close FIRST (most reliable for indices)
+              // Priority: ohlc.close > prev_close_price > previous_close > close_price
+              let apiPrevClose = 0;
+              if (typeof val?.ohlc?.close === "number" && val.ohlc.close > 0) {
+                apiPrevClose = val.ohlc.close;
+              } else if (
+                typeof val?.prev_close_price === "number" &&
+                val.prev_close_price > 0
+              ) {
+                apiPrevClose = val.prev_close_price;
+              } else if (
+                typeof val?.previous_close === "number" &&
+                val.previous_close > 0
+              ) {
+                apiPrevClose = val.previous_close;
+              } else if (
+                typeof val?.close_price === "number" &&
+                val.close_price > 0
+              ) {
+                apiPrevClose = val.close_price;
+              }
+
+              // FIX 1: Log warning if no prevClose found so it's visible in devtools
+              if (apiPrevClose === 0) {
+                console.warn(
+                  `[IndexBar] No prevClose found for ${key}. Raw OHLC val keys:`,
+                  Object.keys(val),
+                  "ohlc:",
+                  val?.ohlc,
+                );
+              }
+
+              // FIX 7: Immutable state update — spread existing tick, only update fields
+              const prevClose =
+                apiPrevClose > 0 ? apiPrevClose : (prev[key]?.prevClose ?? 0);
+
               if (ltp > 0) {
-                // Always prefer API prevClose; ohlc.close is yesterday's close
-                const apiPrevClose =
-                  val?.prev_close_price ??
-                  val?.previous_close ??
-                  val?.ohlc?.close ??
-                  0;
-                const prevClose =
-                  apiPrevClose > 0 ? apiPrevClose : (prev[key]?.prevClose ?? 0);
                 const changePct =
                   prevClose > 0
                     ? ((ltp - prevClose) / prevClose) * 100
                     : (prev[key]?.change ?? 0);
                 next[key] = {
+                  ...prev[key],
                   key,
                   ltp,
                   change: changePct,
                   prevClose,
-                  bid: 0,
-                  ask: 0,
-                  volume: 0,
                   ts: now,
+                };
+              } else if (apiPrevClose > 0 && prev[key]) {
+                // ltp not in OHLC response but prevClose is - update prevClose on existing tick
+                next[key] = {
+                  ...prev[key],
+                  prevClose,
                 };
               }
             }
@@ -464,7 +523,10 @@ function useIndexWebSocket(token: string) {
           setLastUpdated(new Date());
           lastSuccessRef.current = Date.now();
         }
-      } catch {
+      } catch (err) {
+        // FIX 2: Log errors, schedule retry in 2s, preserve existing prevClose values
+        console.warn("[IndexBar] OHLC fetch error:", err);
+        retryTimer = setTimeout(poll, 2000);
       } finally {
         isFetchingRef.current = false;
       }
@@ -485,6 +547,7 @@ function useIndexWebSocket(token: string) {
     return () => {
       clearInterval(id);
       clearInterval(watchdog);
+      if (retryTimer) clearTimeout(retryTimer);
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [token]);
@@ -554,12 +617,33 @@ function IndexChip({
 
   // Row 2: running intraday change vs Prev Close
   const prevClose = tick?.prevClose ?? 0;
-  const hasValidPrevClose = prevClose > 0 && tick && tick.ltp > 0;
-  const intradayChange = hasValidPrevClose ? tick.ltp - prevClose : 0;
+  const ltpAvailable = !!(tick && tick.ltp > 0);
+  const hasValidPrevClose = prevClose > 0 && ltpAvailable;
+  const intradayChange = hasValidPrevClose ? tick!.ltp - prevClose : 0;
   const intradayChangePct = hasValidPrevClose
     ? (intradayChange / prevClose) * 100
     : 0;
   const pos = intradayChange >= 0;
+
+  // FIX 5: Track how long we've had LTP without prevClose — trigger shimmer
+  const [prevCloseWaitMs, setPrevCloseWaitMs] = useState(0);
+  const prevCloseWaitRef = useRef(0);
+
+  useEffect(() => {
+    if (!ltpAvailable || hasValidPrevClose) {
+      prevCloseWaitRef.current = 0;
+      setPrevCloseWaitMs(0);
+      return;
+    }
+    // LTP available but prevClose still 0 — count up every 500ms
+    const id = setInterval(() => {
+      prevCloseWaitRef.current += 500;
+      setPrevCloseWaitMs(prevCloseWaitRef.current);
+    }, 500);
+    return () => clearInterval(id);
+  }, [ltpAvailable, hasValidPrevClose]);
+
+  const showShimmer = ltpAvailable && !hasValidPrevClose;
 
   const getTimeAgo = (ts: number) => {
     const secs = Math.floor((Date.now() - ts) / 1000);
@@ -614,9 +698,17 @@ function IndexChip({
             {intradayChange.toFixed(2)} ({pos ? "+" : ""}
             {intradayChangePct.toFixed(2)}%)
           </span>
-        ) : tick ? (
-          <span className="text-[10px] text-muted-foreground/50 font-mono-data px-1">
-            —
+        ) : showShimmer ? (
+          /* FIX 5: Show loading shimmer while prevClose is being fetched */
+          <span
+            className={`text-[10px] font-mono-data px-1.5 py-0.5 rounded border border-border bg-muted/30 ${
+              prevCloseWaitMs > 5000
+                ? "text-amber-400/70"
+                : "text-muted-foreground/50"
+            } animate-pulse`}
+            title="Fetching previous close…"
+          >
+            {prevCloseWaitMs > 5000 ? "⟳ prev close" : "· · ·"}
           </span>
         ) : null}
       </div>
@@ -4113,15 +4205,31 @@ function SignalAlertPopup({
   onDismiss: () => void;
 }) {
   const isCall = signal.action === "BUY CALL";
-  const bgStyle = isCall
-    ? {
-        background: "oklch(0.20 0.08 145)",
-        border: "1.5px solid oklch(0.45 0.18 145)",
+  const soundIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Play chime immediately on mount + repeat every 2 seconds
+  useEffect(() => {
+    playSignalChime();
+    soundIntervalRef.current = setInterval(() => {
+      playSignalChime();
+    }, 2000);
+    return () => {
+      if (soundIntervalRef.current) {
+        clearInterval(soundIntervalRef.current);
+        soundIntervalRef.current = null;
       }
-    : {
-        background: "oklch(0.18 0.07 22)",
-        border: "1.5px solid oklch(0.50 0.20 22)",
-      };
+    };
+  }, []);
+
+  const handleDismiss = useCallback(() => {
+    if (soundIntervalRef.current) {
+      clearInterval(soundIntervalRef.current);
+      soundIntervalRef.current = null;
+    }
+    onDismiss();
+  }, [onDismiss]);
+
+  const borderColor = isCall ? "2px solid #22c55e" : "2px solid #ef4444";
 
   const timeStr = new Date(signal.timestamp).toLocaleTimeString("en-IN", {
     hour: "2-digit",
@@ -4141,11 +4249,12 @@ function SignalAlertPopup({
         width: "260px",
         borderRadius: "10px",
         padding: "12px 14px",
-        boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+        background: "#ffffff",
+        border: borderColor,
+        boxShadow: "0 8px 32px rgba(0,0,0,0.35)",
         animation: "slideInFromRight 0.3s ease-out",
-        ...bgStyle,
       }}
-      onMouseEnter={onDismiss}
+      onMouseEnter={handleDismiss}
     >
       <style>{`
         @keyframes slideInFromRight {
@@ -4157,16 +4266,15 @@ function SignalAlertPopup({
       <div className="flex items-center justify-between mb-2">
         <span
           className="text-sm font-black tracking-tight"
-          style={{
-            color: isCall ? "oklch(0.75 0.22 145)" : "oklch(0.75 0.22 22)",
-          }}
+          style={{ color: isCall ? "#16a34a" : "#dc2626" }}
         >
           {isCall ? "🟢 BUY CALL" : "🔴 BUY PUT"}
         </span>
         <button
           type="button"
-          onClick={onDismiss}
-          className="text-foreground/50 hover:text-foreground transition-colors"
+          onClick={handleDismiss}
+          style={{ color: "#6b7280" }}
+          className="hover:opacity-70 transition-opacity"
           aria-label="Dismiss alert"
         >
           <X className="w-3.5 h-3.5" />
@@ -4174,11 +4282,14 @@ function SignalAlertPopup({
       </div>
       {/* Strike info */}
       <div className="mb-2">
-        <span className="font-mono-data font-bold text-foreground text-base">
+        <span
+          className="font-mono-data font-bold text-base"
+          style={{ color: "#111827" }}
+        >
           {signal.instrument} {signal.strike.toLocaleString("en-IN")}{" "}
           {isCall ? "CE" : "PE"}
         </span>
-        <span className="ml-2 text-[10px] text-foreground/60">
+        <span className="ml-2 text-[10px]" style={{ color: "#6b7280" }}>
           {signal.expiry}
         </span>
       </div>
@@ -4188,25 +4299,23 @@ function SignalAlertPopup({
           {
             label: "Entry",
             value: signal.entryPrice.toFixed(2),
-            cls: "text-blue-300",
+            color: "#2563eb",
           },
-          { label: "SL", value: signal.sl.toFixed(2), cls: "text-red-400" },
-          {
-            label: "TGT1",
-            value: signal.tgt1.toFixed(2),
-            cls: "text-green-400",
-          },
-          {
-            label: "TGT2",
-            value: signal.tgt2.toFixed(2),
-            cls: "text-emerald-300",
-          },
-        ].map(({ label, value, cls }) => (
+          { label: "SL", value: signal.sl.toFixed(2), color: "#dc2626" },
+          { label: "TGT1", value: signal.tgt1.toFixed(2), color: "#16a34a" },
+          { label: "TGT2", value: signal.tgt2.toFixed(2), color: "#059669" },
+        ].map(({ label, value, color }) => (
           <div key={label} className="text-center">
-            <div className="text-[8px] text-foreground/60 font-bold uppercase tracking-wider">
+            <div
+              className="text-[8px] font-bold uppercase tracking-wider"
+              style={{ color: "#9ca3af" }}
+            >
               {label}
             </div>
-            <div className={`font-mono-data text-[10px] font-bold ${cls}`}>
+            <div
+              className="font-mono-data text-[10px] font-bold"
+              style={{ color }}
+            >
               ₹{value}
             </div>
           </div>
@@ -4214,8 +4323,10 @@ function SignalAlertPopup({
       </div>
       {/* Footer */}
       <div className="flex items-center justify-between">
-        <span className="text-[9px] text-foreground/50">{timeStr}</span>
-        <span className="text-[9px] text-foreground/40 italic">
+        <span className="text-[9px]" style={{ color: "#9ca3af" }}>
+          {timeStr}
+        </span>
+        <span className="text-[9px] italic" style={{ color: "#d1d5db" }}>
           hover to dismiss
         </span>
       </div>
@@ -4305,11 +4416,11 @@ function OptionChainTab({
       const updated = [newSignal, ...existing].slice(0, 30);
       localStorage.setItem("upstox_signals_v1", JSON.stringify(updated));
       setSignals(updated);
-      // Trigger popup alert + sound for new BUY CALL / BUY PUT signals
+      // Trigger popup alert for new BUY CALL / BUY PUT signals
+      // Sound is handled inside SignalAlertPopup via useEffect (continuous 2s repeat)
       if (lastAlertedSignalIdRef.current !== newSignal.id) {
         lastAlertedSignalIdRef.current = newSignal.id;
         setAlertSignal(newSignal);
-        playSignalChime();
         // Auto-dismiss after 30 seconds
         setTimeout(
           () =>
