@@ -2295,10 +2295,12 @@ function TrendAnalysisPanel({
     });
   }
 
-  // Signal 5: Delta momentum — relaxed thresholds
+  // Signal 5: Delta momentum — check CE delta for bullish, PE delta for bearish
   if (greeksData && atm) {
     const atmCeKey5 = atm.call_options?.instrument_key;
+    const atmPeKey5 = atm.put_options?.instrument_key;
     const atmCeDelta = atmCeKey5 ? (greeksData[atmCeKey5]?.delta ?? 0) : 0;
+    const atmPeDelta = atmPeKey5 ? (greeksData[atmPeKey5]?.delta ?? 0) : 0;
     if (atmCeDelta > 0.5) {
       bullSignals++;
       signalDetails.push({
@@ -2306,12 +2308,19 @@ function TrendAnalysisPanel({
         bull: true,
         reason: `CE Delta ${atmCeDelta.toFixed(3)} > 0.50 — bullish momentum`,
       });
-    } else if (atmCeDelta > 0 && atmCeDelta < 0.5) {
+    } else if (Math.abs(atmPeDelta) > 0.45 && atmPeDelta < 0) {
+      // PE delta < -0.45 indicates strong put momentum (bearish)
       bearSignals++;
       signalDetails.push({
         label: "Delta",
         bull: false,
-        reason: `CE Delta ${atmCeDelta.toFixed(3)} < 0.50 — bearish momentum`,
+        reason: `PE Delta ${atmPeDelta.toFixed(3)} < -0.45 — strong put momentum, bearish`,
+      });
+    } else if (atmCeDelta > 0 || atmPeDelta < 0) {
+      signalDetails.push({
+        label: "Delta",
+        bull: null,
+        reason: `CE Δ ${atmCeDelta.toFixed(3)} / PE Δ ${atmPeDelta.toFixed(3)} — weak directional bias`,
       });
     } else
       signalDetails.push({
@@ -2333,6 +2342,9 @@ function TrendAnalysisPanel({
   const peBelowAtm = atm
     ? top3PeOI.filter((r) => r.strike_price < atm.strike_price).length
     : 0;
+  const peAboveAtm = atm
+    ? top3PeOI.filter((r) => r.strike_price >= atm.strike_price).length
+    : 0;
   if (ceAboveAtm >= 2 && peBelowAtm >= 2) {
     bullSignals++;
     signalDetails.push({
@@ -2340,12 +2352,13 @@ function TrendAnalysisPanel({
       bull: true,
       reason: `CE OI above ATM (${ceAboveAtm}/3), PE OI below ATM (${peBelowAtm}/3) — range bullish`,
     });
-  } else if (ceAboveAtm <= 1 || peBelowAtm <= 1) {
+  } else if (peAboveAtm >= 2 || ceAboveAtm === 0) {
+    // PE top OI clustered at/above ATM = bearish breakdown setup
     bearSignals++;
     signalDetails.push({
       label: "OI Zone",
       bull: false,
-      reason: `OI concentration not supportive — ${ceAboveAtm}/3 CE above, ${peBelowAtm}/3 PE below`,
+      reason: `PE OI at/above ATM (${peAboveAtm}/3) — put buildup at resistance, bearish`,
     });
   } else
     signalDetails.push({
@@ -2417,54 +2430,64 @@ function TrendAnalysisPanel({
       reason: `OI ratio ${oiRatio.toFixed(2)} — balanced`,
     });
 
-  // Signal 9: Spot vs Max Pain distance — how far is market from pain?
+  // Signal 9: Spot vs Max Pain distance — 0.5% threshold for clear directional pull
   const painDist = atm ? underlyingLtp - maxPainStrike : 0;
-  if (painDist > 0 && atm) {
+  const painDistPct = maxPainStrike > 0 ? (painDist / maxPainStrike) * 100 : 0;
+  if (painDistPct > 0.5 && atm) {
     bearSignals++;
     signalDetails.push({
       label: "Pain Pull",
       bull: false,
-      reason: `Spot ${Math.abs(painDist).toFixed(0)} pts above max pain — gravitational pull down`,
+      reason: `Spot ${Math.abs(painDist).toFixed(0)} pts (${Math.abs(painDistPct).toFixed(1)}%) above max pain — gravitational pull down`,
     });
-  } else if (painDist < 0 && atm) {
+  } else if (painDistPct < -0.5 && atm) {
     bullSignals++;
     signalDetails.push({
       label: "Pain Pull",
       bull: true,
-      reason: `Spot ${Math.abs(painDist).toFixed(0)} pts below max pain — gravitational pull up`,
+      reason: `Spot ${Math.abs(painDist).toFixed(0)} pts (${Math.abs(painDistPct).toFixed(1)}%) below max pain — gravitational pull up`,
     });
   } else
     signalDetails.push({
       label: "Pain Pull",
       bull: null,
-      reason: "Spot at max pain",
+      reason: `Spot within 0.5% of max pain (${maxPainStrike}) — no strong pull`,
     });
 
-  // Signal 10: Vega environment — high vega favours buying options
+  // Signal 10: Vega environment — high CE vega = call buying (bullish), high PE vega = put buying (bearish)
   if (greeksData && atm) {
     const atmCeKeyV = atm.call_options?.instrument_key;
-    const atmVegaV = atmCeKeyV ? (greeksData[atmCeKeyV]?.vega ?? 0) : 0;
-    if (atmVegaV > 5) {
+    const atmPeKeyV = atm.put_options?.instrument_key;
+    const atmCeVega = atmCeKeyV ? (greeksData[atmCeKeyV]?.vega ?? 0) : 0;
+    const atmPeVega = atmPeKeyV ? (greeksData[atmPeKeyV]?.vega ?? 0) : 0;
+    const vegaDiff = atmCeVega - atmPeVega;
+    if (atmCeVega > 5 && vegaDiff > 1) {
       bullSignals++;
       signalDetails.push({
         label: "Vega",
         bull: true,
-        reason: `Vega ${atmVegaV.toFixed(1)} — rich option premium, long options favoured`,
+        reason: `CE Vega ${atmCeVega.toFixed(1)} > PE Vega ${atmPeVega.toFixed(1)} — call premium rich, bullish demand`,
       });
-    } else if (atmVegaV > 0 && atmVegaV < 2) {
+    } else if (atmPeVega > 5 && vegaDiff < -1) {
       bearSignals++;
       signalDetails.push({
         label: "Vega",
         bull: false,
-        reason: `Vega ${atmVegaV.toFixed(1)} low — thin premium, long options disadvantaged`,
+        reason: `PE Vega ${atmPeVega.toFixed(1)} > CE Vega ${atmCeVega.toFixed(1)} — put premium rich, bearish demand`,
+      });
+    } else if (atmCeVega > 5 || atmPeVega > 5) {
+      signalDetails.push({
+        label: "Vega",
+        bull: null,
+        reason: `Vega near-parity (CE ${atmCeVega.toFixed(1)} / PE ${atmPeVega.toFixed(1)}) — no directional edge`,
       });
     } else
       signalDetails.push({
         label: "Vega",
         bull: null,
         reason:
-          atmVegaV > 0
-            ? `Vega ${atmVegaV.toFixed(1)} neutral`
+          atmCeVega > 0 || atmPeVega > 0
+            ? `Vega low (CE ${atmCeVega.toFixed(1)} / PE ${atmPeVega.toFixed(1)}) — thin premium`
             : "Vega data unavailable",
       });
   } else
@@ -2507,19 +2530,20 @@ function TrendAnalysisPanel({
       // ATM call
       recommendedStrike = atm?.strike_price ?? 0;
     }
-    // Greeks: find best delta strike near 0.45
+    // Greeks: find best CE strike — highest OI with delta > 0.4
     if (greeksData && atm) {
-      let closestDelta = Math.abs(
-        (greeksData[atm.call_options?.instrument_key ?? ""]?.delta ?? 0.5) -
-          0.45,
-      );
+      let bestScore = -1;
       for (const row of chain) {
         const key = row.call_options?.instrument_key;
         if (!key || !greeksData[key]) continue;
-        const d = Math.abs((greeksData[key].delta ?? 0.5) - 0.45);
-        if (d < closestDelta) {
-          closestDelta = d;
-          recommendedStrike = row.strike_price;
+        const d = greeksData[key].delta ?? 0;
+        const oi = row.call_options?.market_data?.oi ?? 0;
+        if (d > 0.4) {
+          const score = oi;
+          if (score > bestScore) {
+            bestScore = score;
+            recommendedStrike = row.strike_price;
+          }
         }
       }
     }
@@ -2530,6 +2554,23 @@ function TrendAnalysisPanel({
       recommendedStrike = chain[atmIdx + 1].strike_price;
     } else if (atmIdx >= 0) {
       recommendedStrike = atm?.strike_price ?? 0;
+    }
+    // Greeks: find best PE strike — highest OI with delta < -0.4 (abs > 0.4)
+    if (greeksData && atm) {
+      let bestScore = -1;
+      for (const row of chain) {
+        const key = row.put_options?.instrument_key;
+        if (!key || !greeksData[key]) continue;
+        const d = greeksData[key].delta ?? 0;
+        const oi = row.put_options?.market_data?.oi ?? 0;
+        if (d < -0.4) {
+          const score = oi;
+          if (score > bestScore) {
+            bestScore = score;
+            recommendedStrike = row.strike_price;
+          }
+        }
+      }
     }
   }
 
@@ -3868,6 +3909,8 @@ function SignalMonitorPanel({
   onClear: () => void;
   chain: OptionData[];
 }) {
+  const [monthlyReportOpen, setMonthlyReportOpen] = useState(false);
+
   const totalSignals = signals.length;
   const activeSignals = signals.filter((s) => s.status === "ACTIVE").length;
   const winSignals = signals.filter(
@@ -3880,6 +3923,48 @@ function SignalMonitorPanel({
 
   const today = new Date().toISOString().slice(0, 10);
   const todayCount = signals.filter((s) => s.date === today).length;
+
+  // ── Monthly report data ───────────────────────────────────────────────────
+  const now = new Date();
+  const monthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const monthName = now.toLocaleString("en-IN", {
+    month: "long",
+    year: "numeric",
+  });
+  const monthSignals = signals.filter((s) => s.date.startsWith(monthPrefix));
+  const monthCalls = monthSignals.filter((s) => s.action === "BUY CALL").length;
+  const monthPuts = monthSignals.filter((s) => s.action === "BUY PUT").length;
+  const monthClosed = monthSignals.filter((s) => s.status !== "ACTIVE").length;
+  const monthWins = monthSignals.filter(
+    (s) => s.status === "TARGET1_HIT" || s.status === "TARGET2_HIT",
+  ).length;
+  const monthSl = monthSignals.filter((s) => s.status === "SL_HIT").length;
+  const monthActive = monthSignals.filter((s) => s.status === "ACTIVE").length;
+  const monthWinPct =
+    monthClosed > 0 ? Math.round((monthWins / monthClosed) * 100) : 0;
+  const monthSlPct =
+    monthClosed > 0 ? Math.round((monthSl / monthClosed) * 100) : 0;
+
+  const getSignalPnlPct = (sig: GeneratedSignal): number | null => {
+    if (sig.status === "TARGET2_HIT") {
+      return ((sig.tgt2 - sig.entryPrice) / sig.entryPrice) * 100;
+    }
+    if (sig.status === "TARGET1_HIT") {
+      return ((sig.tgt1 - sig.entryPrice) / sig.entryPrice) * 100;
+    }
+    if (sig.status === "SL_HIT") {
+      return ((sig.sl - sig.entryPrice) / sig.entryPrice) * 100;
+    }
+    if (sig.status === "ACTIVE") {
+      const row = chain.find((r) => r.strike_price === sig.strike);
+      const ltp =
+        sig.action === "BUY CALL"
+          ? (row?.call_options?.market_data?.ltp ?? 0)
+          : (row?.put_options?.market_data?.ltp ?? 0);
+      if (ltp > 0) return ((ltp - sig.entryPrice) / sig.entryPrice) * 100;
+    }
+    return null;
+  };
 
   const statusConfig = {
     ACTIVE: {
@@ -3989,7 +4074,7 @@ function SignalMonitorPanel({
                 No signals generated yet.
               </p>
               <p className="text-[10px] text-foreground/50 mt-1">
-                Waiting for HIGH confidence confluence (6+/8 signals).
+                Waiting for 4+/10 signal confluence (9:15AM–3:30PM IST).
               </p>
             </div>
           ) : (
@@ -4165,6 +4250,196 @@ function SignalMonitorPanel({
               })}
             </div>
           )}
+
+          {/* ── Monthly Report ──────────────────────────────────────────────── */}
+          <div className="mt-3 border border-border/60 rounded-lg overflow-hidden">
+            <button
+              type="button"
+              data-ocid="monthly_report.toggle"
+              onClick={() => setMonthlyReportOpen((v) => !v)}
+              className="w-full flex items-center justify-between px-3 py-2 bg-secondary/30 hover:bg-secondary/50 transition-colors"
+            >
+              <div className="flex items-center gap-2">
+                <BarChart2 className="w-3 h-3 text-primary" />
+                <span className="text-[10px] font-bold text-foreground/80 tracking-widest uppercase">
+                  Monthly Report
+                </span>
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-primary/15 text-primary font-mono border border-primary/20">
+                  {monthName}
+                </span>
+                {monthSignals.length > 0 && (
+                  <span className="text-[9px] text-foreground/60 font-mono">
+                    {monthSignals.length} signals
+                  </span>
+                )}
+              </div>
+              <ChevronDown
+                className={`w-3.5 h-3.5 text-muted-foreground transition-transform duration-200 ${monthlyReportOpen ? "" : "-rotate-90"}`}
+              />
+            </button>
+
+            {monthlyReportOpen && (
+              <div className="p-3 bg-white dark:bg-card/30">
+                {monthSignals.length === 0 ? (
+                  <p className="text-[11px] text-foreground/50 text-center py-4">
+                    No signals generated this month
+                  </p>
+                ) : (
+                  <>
+                    {/* Summary row */}
+                    <div className="grid grid-cols-3 gap-1.5 mb-3">
+                      {[
+                        {
+                          label: "Total",
+                          value: monthSignals.length,
+                          cls: "text-foreground",
+                        },
+                        {
+                          label: "BUY CALL",
+                          value: monthCalls,
+                          cls: "text-green-500",
+                        },
+                        {
+                          label: "BUY PUT",
+                          value: monthPuts,
+                          cls: "text-red-400",
+                        },
+                        {
+                          label: "Win Rate",
+                          value: `${monthWinPct}%`,
+                          cls:
+                            monthWinPct >= 60
+                              ? "text-green-400"
+                              : monthWinPct >= 40
+                                ? "text-amber-400"
+                                : "text-red-400",
+                        },
+                        {
+                          label: "SL Rate",
+                          value: `${monthSlPct}%`,
+                          cls:
+                            monthSlPct > 0 ? "text-red-400" : "text-green-400",
+                        },
+                        {
+                          label: "Active",
+                          value: monthActive,
+                          cls: "text-amber-400",
+                        },
+                      ].map(({ label, value, cls }) => (
+                        <div
+                          key={label}
+                          className="bg-secondary/20 rounded p-1.5 text-center border border-border/40"
+                        >
+                          <p className="text-[8px] text-foreground/60 font-semibold uppercase tracking-wider truncate">
+                            {label}
+                          </p>
+                          <p
+                            className={`font-mono text-[11px] font-bold ${cls}`}
+                          >
+                            {value}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Detail table */}
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-[9px] border-collapse">
+                        <thead>
+                          <tr className="border-b border-border/60">
+                            {[
+                              "Date",
+                              "Type",
+                              "Entry",
+                              "SL",
+                              "TGT1",
+                              "TGT2",
+                              "Status",
+                              "P&L%",
+                            ].map((h) => (
+                              <th
+                                key={h}
+                                className="px-1.5 py-1 text-left text-[8px] font-bold text-foreground/60 uppercase tracking-wider whitespace-nowrap"
+                              >
+                                {h}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {[...monthSignals]
+                            .sort((a, b) => b.timestamp - a.timestamp)
+                            .map((sig) => {
+                              const cfg = statusConfig[sig.status];
+                              const isCall = sig.action === "BUY CALL";
+                              const dd = sig.date.slice(8, 10);
+                              const mm = sig.date.slice(5, 7);
+                              const pnlPct = getSignalPnlPct(sig);
+                              return (
+                                <tr
+                                  key={sig.id}
+                                  className="border-b border-border/20 hover:bg-secondary/10"
+                                >
+                                  <td className="px-1.5 py-1 font-mono text-foreground/70 whitespace-nowrap">
+                                    {dd}-{mm}
+                                  </td>
+                                  <td className="px-1.5 py-1 whitespace-nowrap">
+                                    <span
+                                      className={`text-[8px] font-bold px-1 py-0.5 rounded ${
+                                        isCall
+                                          ? "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300"
+                                          : "bg-red-100 text-red-600 dark:bg-red-900/40 dark:text-red-300"
+                                      }`}
+                                    >
+                                      {isCall ? "▲ CALL" : "▼ PUT"}
+                                    </span>
+                                  </td>
+                                  <td className="px-1.5 py-1 font-mono text-blue-400 whitespace-nowrap">
+                                    {sig.entryPrice.toFixed(2)}
+                                  </td>
+                                  <td className="px-1.5 py-1 font-mono text-red-400 whitespace-nowrap">
+                                    {sig.sl.toFixed(2)}
+                                  </td>
+                                  <td className="px-1.5 py-1 font-mono text-green-400 whitespace-nowrap">
+                                    {sig.tgt1.toFixed(2)}
+                                  </td>
+                                  <td className="px-1.5 py-1 font-mono text-emerald-400 whitespace-nowrap">
+                                    {sig.tgt2.toFixed(2)}
+                                  </td>
+                                  <td className="px-1.5 py-1 whitespace-nowrap">
+                                    <span
+                                      className={`text-[8px] font-bold px-1 py-0.5 rounded border ${cfg.cls}`}
+                                    >
+                                      {cfg.label}
+                                    </span>
+                                  </td>
+                                  <td
+                                    className={`px-1.5 py-1 font-mono font-bold whitespace-nowrap ${
+                                      pnlPct === null
+                                        ? "text-foreground/40"
+                                        : pnlPct >= 0
+                                          ? "text-green-400"
+                                          : "text-red-400"
+                                    }`}
+                                  >
+                                    {pnlPct === null
+                                      ? "—"
+                                      : `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%`}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="text-[8px] text-foreground/40 mt-2 text-center">
+                      Signals auto-clear after 30 days · {monthName}
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -4364,7 +4639,16 @@ function OptionChainTab({
 
   const loadSignals = (): GeneratedSignal[] => {
     try {
-      return JSON.parse(localStorage.getItem(SIGNALS_KEY) ?? "[]");
+      const raw: GeneratedSignal[] = JSON.parse(
+        localStorage.getItem(SIGNALS_KEY) ?? "[]",
+      );
+      // Auto-clear signals older than 30 days
+      const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+      const filtered = raw.filter((s) => s.timestamp >= cutoff);
+      if (filtered.length !== raw.length) {
+        localStorage.setItem(SIGNALS_KEY, JSON.stringify(filtered));
+      }
+      return filtered;
     } catch {
       return [];
     }
